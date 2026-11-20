@@ -31,7 +31,7 @@ export class DashboardService {
 
     // Total sales (excluding cancelled orders)
     const validOrders = orders.filter((o) => o.orderStatus?.toUpperCase() !== 'CANCELLED');
-    const totalSales = Math.round(validOrders.reduce((sum, o) => sum + (o.total || 0), 0));
+    const totalSales = Math.round(validOrders.reduce((sum, o) => sum + Number(o.total || 0), 0));
 
     // Products statistics
     const totalProducts = products.length;
@@ -62,7 +62,7 @@ export class DashboardService {
       if (last7Days[dateKey]) {
         last7Days[dateKey].count++;
         if (o.orderStatus?.toUpperCase() !== 'CANCELLED') {
-          last7Days[dateKey].sales += o.total || 0;
+          last7Days[dateKey].sales += Number(o.total || 0);
         }
       }
     });
@@ -75,6 +75,7 @@ export class DashboardService {
         newOrders: pendingOrders,
         completedOrders,
         cancelledOrders,
+        totalSales,
         totalDemoSales: totalSales,
         totalProducts,
         outOfStockProducts,

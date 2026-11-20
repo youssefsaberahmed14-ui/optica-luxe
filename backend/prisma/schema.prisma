@@ -13,8 +13,8 @@ model Product {
   nameAr          String?
   description     String?
   descriptionAr   String?
-  price           Float
-  oldPrice        Float?
+  price           Decimal     @db.Decimal(10, 2)
+  oldPrice        Decimal?    @db.Decimal(10, 2)
   discountPercent Int?
   image           String      // Primary image URL
   images          String[]    // Array of image URLs
@@ -58,15 +58,17 @@ model Order {
   email               String
   address             String
   city                String               @default("القاهرة")
-  subtotal            Float
-  discount            Float                @default(0)
-  shipping            Float                @default(0)
-  total               Float
+  subtotal            Decimal              @db.Decimal(10, 2)
+  discount            Decimal              @default(0) @db.Decimal(10, 2)
+  shipping            Decimal              @default(0) @db.Decimal(10, 2)
+  total               Decimal              @db.Decimal(10, 2)
   couponCode          String?
   paymentMethod       String               @default("COD")    // Strictly COD
   paymentStatus       String               @default("UNPAID") // UNPAID, PAID
   orderStatus         String               @default("PENDING") // PENDING, CONFIRMED, PROCESSING, SHIPPED, DELIVERED, CANCELLED
   notes               String?
+  paidAt              DateTime?
+  paidBy              String?
   cancelledAt         DateTime?
   cancelledBy         String?
   cancellationReason  String?
@@ -106,9 +108,9 @@ model OrderItem {
   product       Product  @relation(fields: [productId], references: [id])
   productName   String
   productImage  String
-  unitPrice     Float
+  unitPrice     Decimal  @db.Decimal(10, 2)
   quantity      Int
-  total         Float
+  total         Decimal  @db.Decimal(10, 2)
   selectedColor String?
   lensOption    String?
   createdAt     DateTime @default(now())
@@ -133,7 +135,7 @@ model Coupon {
   id            String    @id @default(uuid())
   code          String    @unique
   discountType  String    @default("PERCENTAGE") // PERCENTAGE, FIXED
-  discountValue Float     // 15 = 15%, or 200 = 200 EGP
+  discountValue Decimal   @db.Decimal(10, 2)     // 15.00 = 15%, or 200.00 = 200.00 EGP
   isActive      Boolean   @default(true)
   expiryDate    DateTime?
   usageCount    Int       @default(0)

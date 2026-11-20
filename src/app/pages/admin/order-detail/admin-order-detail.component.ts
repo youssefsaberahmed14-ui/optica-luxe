@@ -243,6 +243,25 @@ import { IconComponent } from '../../../shared/components/icon/icon.component';
                   }
                 </button>
 
+                @if (order()!.paymentStatus === 'PAID') {
+                  <div class="paid-info-badge mt-2" style="background: #e8f5e9; color: #2e7d32; padding: 0.6rem 0.8rem; border-radius: 6px; font-size: 0.85rem; border: 1px solid #c8e6c9; text-align: center;">
+                    <strong>تم تحصيل النقدية (COD) بواسطة: {{ order()!.paidBy || 'المسؤول' }}</strong>
+                    @if (order()!.paidAt) {
+                      <div style="font-size: 0.78rem; color: #388e3c; margin-top: 0.2rem;">التاريخ: {{ order()!.paidAt | date:'medium' }}</div>
+                    }
+                  </div>
+                } @else if (order()!.orderStatus === 'DELIVERED') {
+                  <button
+                    (click)="confirmCashCollection()"
+                    [disabled]="updating()"
+                    class="btn btn-block mt-2"
+                    style="background: #2e7d32; color: #fff; font-weight: bold; border: none; padding: 0.7rem; border-radius: 6px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 0.5rem;"
+                  >
+                    <app-icon name="check" [size]="16"></app-icon>
+                    <span>تأكيد تحصيل النقدية (COD Paid)</span>
+                  </button>
+                }
+
                 @if (order()!.orderStatus !== 'CANCELLED') {
                   <button
                     (click)="quickCancel()"
@@ -724,6 +743,32 @@ export class AdminOrderDetailComponent implements OnInit {
           this.showToast(err?.error?.message || 'حدث خطأ أثناء حفظ التحديث', 'error');
         },
       });
+  }
+
+  confirmCashCollection(): void {
+    const currentOrder = this.order();
+    if (!currentOrder) return;
+
+    if (currentOrder.orderStatus !== 'DELIVERED') {
+      this.showToast('لا يمكن تأكيد تحصيل النقدية إلا بعد توصيل الطلب للعميل فعلياً (DELIVERED).', 'error');
+      return;
+    }
+
+    this.updating.set(true);
+    this.orderApiService.collectCash(currentOrder.id || currentOrder.orderNumber).subscribe({
+      next: (res) => {
+        this.updating.set(false);
+        if (res.success && res.data) {
+          this.order.set(res.data);
+          this.editPaymentStatus = 'PAID';
+          this.showToast(res.message || 'تم تأكيد تحصيل النقدية بنجاح.', 'success');
+        }
+      },
+      error: (err) => {
+        this.updating.set(false);
+        this.showToast(err?.error?.message || 'تعذر تأكيد تحصيل النقدية.', 'error');
+      },
+    });
   }
 
   quickCancel(): void {

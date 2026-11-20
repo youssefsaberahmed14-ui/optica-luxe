@@ -1,7 +1,11 @@
 import crypto from 'crypto';
+import Decimal from 'decimal.js';
 import { env } from '../config/env';
 import { isPostgresConnected, isolatedTestDb, prisma } from '../database/prisma';
 import { CreateOrderInput, TrackOrderInput, UpdateOrderStatusInput } from '../validators/order.validator';
+
+// Configure Decimal precision & Half-Up rounding for financial EGP calculations
+Decimal.set({ precision: 20, rounding: Decimal.ROUND_HALF_UP });
 
 export interface OrderQueryFilters {
   search?: string;
@@ -17,6 +21,31 @@ export interface AdminActor {
   email?: string;
   name?: string;
   role?: string;
+}
+
+// Sanitized Order Item DTO for public checkout confirmation
+export interface SanitizedOrderItemSummary {
+  productName: string;
+  productImage?: string;
+  quantity: number;
+  unitPrice: number;
+  total: number;
+  selectedColor?: string | null;
+  lensOption?: string | null;
+}
+
+// Sanitized Checkout Confirmation DTO (Zero private customer data, zero DB IDs, zero token hashes)
+export interface SanitizedOrderConfirmation {
+  orderNumber: string;
+  orderStatus: string;
+  paymentMethod: string;
+  paymentStatus: string;
+  subtotal: number;
+  discount: number;
+  shipping: number;
+  total: number;
+  createdAt: Date | string;
+  items: SanitizedOrderItemSummary[];
 }
 
 // Valid Order Status State Machine Transitions
@@ -53,8 +82,64 @@ export class OrderService {
   }
 
   /**
+   * Sanitizes an order record into the safe checkout confirmation DTO.
+   * Strips all internal IDs, token hashes, and unnecessary customer PII.
+   */
+  public sanitizeOrderConfirmation(order: any): SanitizedOrderConfirmation {
+    const subtotal = new Decimal(order.subtotal?.toString() || '0').toNumber();
+    const discount = new Decimal(order.discount?.toString() || '0').toNumber();
+    const shipping = new Decimal(order.shipping?.toString() || '0').toNumber();
+    const total = new Decimal(order.total?.toString() || '0').toNumber();
+
+    return {
+      orderNumber: order.orderNumber,
+      orderStatus: order.orderStatus,
+      paymentMethod: order.paymentMethod,
+      paymentStatus: order.paymentStatus,
+      subtotal,
+      discount,
+      shipping,
+      total,
+      createdAt: order.createdAt,
+      items: (order.items || []).map((item: any) => ({
+        productName: item.productName,
+        productImage: item.productImage || '',
+        quantity: item.quantity,
+        unitPrice: new Decimal(item.unitPrice?.toString() || '0').toNumber(),
+        total: new Decimal(item.total?.toString() || '0').toNumber(),
+        selectedColor: item.selectedColor || null,
+        lensOption: item.lensOption || null,
+      })),
+    };
+  }
+
+  /**
+   * Verifies if an existing order matches the submitted checkout payload for idempotency.
+   */
+  private isPayloadMatching(existingOrder: any, input: CreateOrderInput): boolean {
+    const normalize = (s: string) => s.trim().toLowerCase();
+    if (normalize(existingOrder.customerName) !== normalize(input.customerName)) return false;
+    if (normalize(existingOrder.email) !== normalize(input.email)) return false;
+    if (normalize(existingOrder.phone) !== normalize(input.phone)) return false;
+
+    // Compare item count
+    if (!existingOrder.items || existingOrder.items.length !== input.items.length) return false;
+
+    // Compare item productIds and quantities
+    for (const inItem of input.items) {
+      const match = existingOrder.items.find(
+        (ex: any) => ex.productId === inItem.productId && ex.quantity === inItem.quantity
+      );
+      if (!match) return false;
+    }
+
+    return true;
+  }
+
+  /**
    * Creates a new customer COD order inside an atomic transaction.
-   * Performs authoritative server-side pricing, inventory deduction, and coupon validation.
+   * Performs authoritative server-side pricing with Decimal arithmetic, inventory deduction,
+   * coupon validation, and strict idempotency handling.
    */
   async createOrder(input: CreateOrderInput) {
     // In production, PostgreSQL is mandatory. No in-memory orders allowed.
@@ -69,7 +154,7 @@ export class OrderService {
       throw { statusCode: 400, message: 'سلة المشتريات فارغة.' };
     }
 
-    // 1. Idempotency Check: prevent duplicate orders if client retries
+    // 1. Idempotency Check: Prevent duplicate orders if client retries with same idempotency key
     if (input.idempotencyKey) {
       const existing = isPostgresConnected
         ? await prisma.order.findUnique({
@@ -79,8 +164,16 @@ export class OrderService {
         : isolatedTestDb.orders.find((o) => o.idempotencyKey === input.idempotencyKey);
 
       if (existing) {
+        // Enforce that re-using the same key with a DIFFERENT payload is rejected
+        if (!this.isPayloadMatching(existing, input)) {
+          throw {
+            statusCode: 409,
+            message: 'مفتاح عدم التكرار (Idempotency Key) مسجل مسبقاً لطلب مختلف. لا يمكن استخدام نفس المفتاح مع بيانات طلب مختلفة.',
+          };
+        }
+
         return {
-          order: existing,
+          order: this.sanitizeOrderConfirmation(existing),
           trackingToken: null,
           isDuplicate: true,
         };
@@ -96,135 +189,165 @@ export class OrderService {
 
     // --- Production / Live PostgreSQL Path with Atomic Transactions ---
     if (isPostgresConnected) {
-      return prisma.$transaction(async (tx) => {
-        // A. Authoritative product lookup
-        const dbProducts = await tx.product.findMany({
-          where: { id: { in: uniqueProductIds } },
-        });
-
-        if (dbProducts.length !== uniqueProductIds.length) {
-          throw { statusCode: 400, message: 'أحد المنتجات المطلوبة غير متوفر في المتجر.' };
-        }
-
-        // B. Calculate subtotal & construct items with server prices
-        let calculatedSubtotal = 0;
-        const itemsToCreate: any[] = [];
-
-        for (const item of input.items) {
-          const dbProd = dbProducts.find((p) => p.id === item.productId);
-          if (!dbProd) {
-            throw { statusCode: 400, message: `المنتج رقم ${item.productId} غير موجود.` };
-          }
-
-          if (item.quantity <= 0) {
-            throw { statusCode: 400, message: 'الكمية المطلوبة يجب أن تكون أكبر من الصفر.' };
-          }
-
-          // C. Atomic conditional inventory deduction: stock >= quantity
-          const updateStockResult = await tx.product.updateMany({
-            where: {
-              id: item.productId,
-              stock: { gte: item.quantity },
-            },
-            data: {
-              stock: { decrement: item.quantity },
-            },
+      try {
+        return await prisma.$transaction(async (tx) => {
+          // A. Authoritative product lookup
+          const dbProducts = await tx.product.findMany({
+            where: { id: { in: uniqueProductIds } },
           });
 
-          if (updateStockResult.count === 0) {
-            throw {
-              statusCode: 400,
-              message: `عذراً، الكمية المطلوبة للمنتج "${dbProd.nameAr || dbProd.name}" غير متوفرة في المخزون (المتبقي: ${dbProd.stock}).`,
-            };
+          if (dbProducts.length !== uniqueProductIds.length) {
+            throw { statusCode: 400, message: 'أحد المنتجات المطلوبة غير متوفر في المتجر.' };
           }
 
-          const unitPrice = dbProd.price;
-          const lineTotal = unitPrice * item.quantity;
-          calculatedSubtotal += lineTotal;
+          // B. Calculate subtotal & construct items with server prices using Decimal arithmetic
+          let calculatedSubtotal = new Decimal(0);
+          const itemsToCreate: any[] = [];
 
-          itemsToCreate.push({
-            productId: dbProd.id,
-            productName: dbProd.nameAr || dbProd.name,
-            productImage: dbProd.image || '',
-            unitPrice,
-            quantity: item.quantity,
-            total: lineTotal,
-            selectedColor: item.selectedColor || null,
-            lensOption: item.lensOption || null,
-          });
-        }
+          for (const item of input.items) {
+            const dbProd = dbProducts.find((p) => p.id === item.productId);
+            if (!dbProd) {
+              throw { statusCode: 400, message: `المنتج رقم ${item.productId} غير موجود.` };
+            }
 
-        // D. Coupon validation & discount calculation
-        let discountAmount = 0;
-        let validCouponCode: string | null = null;
+            if (item.quantity <= 0) {
+              throw { statusCode: 400, message: 'الكمية المطلوبة يجب أن تكون أكبر من الصفر.' };
+            }
 
-        if (input.couponCode && input.couponCode.trim() !== '') {
-          const code = input.couponCode.trim().toUpperCase();
-          const coupon = await tx.coupon.findUnique({ where: { code } });
+            // C. Atomic conditional inventory deduction: stock >= quantity
+            const updateStockResult = await tx.product.updateMany({
+              where: {
+                id: item.productId,
+                stock: { gte: item.quantity },
+              },
+              data: {
+                stock: { decrement: item.quantity },
+              },
+            });
 
-          if (coupon && coupon.isActive) {
-            const notExpired = !coupon.expiryDate || new Date(coupon.expiryDate) > new Date();
-            if (notExpired) {
-              validCouponCode = coupon.code;
-              if (coupon.discountType === 'PERCENTAGE') {
-                discountAmount = (calculatedSubtotal * coupon.discountValue) / 100;
-              } else {
-                discountAmount = Math.min(coupon.discountValue, calculatedSubtotal);
+            if (updateStockResult.count === 0) {
+              throw {
+                statusCode: 400,
+                message: `عذراً، الكمية المطلوبة للمنتج "${dbProd.nameAr || dbProd.name}" غير متوفرة في المخزون (المتبقي: ${dbProd.stock}).`,
+              };
+            }
+
+            const unitPrice = new Decimal(dbProd.price.toString()).toDecimalPlaces(2);
+            const lineTotal = unitPrice.times(item.quantity).toDecimalPlaces(2);
+            calculatedSubtotal = calculatedSubtotal.plus(lineTotal).toDecimalPlaces(2);
+
+            itemsToCreate.push({
+              productId: dbProd.id,
+              productName: dbProd.nameAr || dbProd.name,
+              productImage: dbProd.image || '',
+              unitPrice: unitPrice.toNumber(),
+              quantity: item.quantity,
+              total: lineTotal.toNumber(),
+              selectedColor: item.selectedColor || null,
+              lensOption: item.lensOption || null,
+            });
+          }
+
+          // D. Coupon validation & discount calculation using Decimal arithmetic
+          let discountAmount = new Decimal(0);
+          let validCouponCode: string | null = null;
+
+          if (input.couponCode && input.couponCode.trim() !== '') {
+            const code = input.couponCode.trim().toUpperCase();
+            const coupon = await tx.coupon.findUnique({ where: { code } });
+
+            if (coupon && coupon.isActive) {
+              const notExpired = !coupon.expiryDate || new Date(coupon.expiryDate) > new Date();
+              if (notExpired) {
+                validCouponCode = coupon.code;
+                const cVal = new Decimal(coupon.discountValue.toString());
+                if (coupon.discountType === 'PERCENTAGE') {
+                  discountAmount = calculatedSubtotal.times(cVal).dividedBy(100).toDecimalPlaces(2);
+                } else {
+                  discountAmount = Decimal.min(cVal, calculatedSubtotal).toDecimalPlaces(2);
+                }
+
+                await tx.coupon.update({
+                  where: { id: coupon.id },
+                  data: { usageCount: { increment: 1 } },
+                });
               }
-              await tx.coupon.update({
-                where: { id: coupon.id },
-                data: { usageCount: { increment: 1 } },
-              });
             }
           }
-        }
 
-        const shipping = calculatedSubtotal >= 2000 ? 0 : 75; // Free shipping above 2000 EGP
-        const total = Math.max(0, calculatedSubtotal - discountAmount + shipping);
+          const shipping = calculatedSubtotal.greaterThanOrEqualTo(2000)
+            ? new Decimal(0)
+            : new Decimal(75); // Free shipping above 2000 EGP
+          const total = Decimal.max(0, calculatedSubtotal.minus(discountAmount).plus(shipping)).toDecimalPlaces(2);
 
-        // E. Create Order record strictly as COD + UNPAID + PENDING
-        const createdOrder = await tx.order.create({
-          data: {
-            orderNumber,
-            trackingTokenHash: tokenHash,
-            idempotencyKey: input.idempotencyKey || null,
-            customerName: input.customerName.trim(),
-            phone: input.phone.trim(),
-            email: input.email.trim().toLowerCase(),
-            address: input.address.trim(),
-            city: input.city.trim(),
-            subtotal: calculatedSubtotal,
-            discount: discountAmount,
-            shipping,
-            total,
-            couponCode: validCouponCode,
-            paymentMethod: 'COD',
-            paymentStatus: 'UNPAID',
-            orderStatus: 'PENDING',
-            notes: input.notes || null,
-            items: {
-              create: itemsToCreate,
-            },
-            statusHistory: {
-              create: {
-                fromStatus: 'INITIAL',
-                toStatus: 'PENDING',
-                changedBy: 'CUSTOMER',
-                notes: 'Order submitted via Cash on Delivery (COD) checkout.',
+          // E. Create Order record strictly as COD + UNPAID + PENDING
+          const createdOrder = await tx.order.create({
+            data: {
+              orderNumber,
+              trackingTokenHash: tokenHash,
+              idempotencyKey: input.idempotencyKey || null,
+              customerName: input.customerName.trim(),
+              phone: input.phone.trim(),
+              email: input.email.trim().toLowerCase(),
+              address: input.address.trim(),
+              city: input.city.trim(),
+              subtotal: calculatedSubtotal.toNumber(),
+              discount: discountAmount.toNumber(),
+              shipping: shipping.toNumber(),
+              total: total.toNumber(),
+              couponCode: validCouponCode,
+              paymentMethod: 'COD',
+              paymentStatus: 'UNPAID',
+              orderStatus: 'PENDING',
+              notes: input.notes || null,
+              items: {
+                create: itemsToCreate,
+              },
+              statusHistory: {
+                create: {
+                  fromStatus: 'INITIAL',
+                  toStatus: 'PENDING',
+                  changedBy: 'CUSTOMER',
+                  notes: 'Order submitted via Cash on Delivery (COD) checkout.',
+                },
               },
             },
-          },
-          include: {
-            items: true,
-          },
-        });
+            include: {
+              items: true,
+            },
+          });
 
-        return {
-          order: createdOrder,
-          trackingToken: rawToken, // Returned ONLY ONCE in successful checkout response
-          isDuplicate: false,
-        };
-      });
+          return {
+            order: this.sanitizeOrderConfirmation(createdOrder),
+            trackingToken: rawToken, // Returned ONLY ONCE in successful checkout response
+            isDuplicate: false,
+          };
+        });
+      } catch (txError: any) {
+        // Handle race conditions on idempotencyKey unique constraint (Prisma P2002)
+        if (txError?.code === 'P2002' && input.idempotencyKey) {
+          const existing = await prisma.order.findUnique({
+            where: { idempotencyKey: input.idempotencyKey },
+            include: { items: true },
+          });
+
+          if (existing) {
+            if (!this.isPayloadMatching(existing, input)) {
+              throw {
+                statusCode: 409,
+                message: 'مفتاح عدم التكرار (Idempotency Key) مسجل مسبقاً لطلب مختلف.',
+              };
+            }
+
+            return {
+              order: this.sanitizeOrderConfirmation(existing),
+              trackingToken: null,
+              isDuplicate: true,
+            };
+          }
+        }
+        throw txError;
+      }
     } else {
       // --- Isolated Test Harness Fallback (Forbidden in Production) ---
       if (env.isProduction) {
@@ -244,28 +367,29 @@ export class OrderService {
       }
 
       // Deduct stock atomically in test harness
-      let subtotal = 0;
+      let subtotal = new Decimal(0);
       const orderId = 'ord-' + Math.random().toString(36).substring(2, 9);
       const items = input.items.map((i) => {
         const prod = isolatedTestDb.products.find((p) => p.id === i.productId)!;
         prod.stock -= i.quantity;
-        const lineTotal = prod.price * i.quantity;
-        subtotal += lineTotal;
+        const unitPrice = new Decimal(prod.price.toString()).toDecimalPlaces(2);
+        const lineTotal = unitPrice.times(i.quantity).toDecimalPlaces(2);
+        subtotal = subtotal.plus(lineTotal).toDecimalPlaces(2);
         return {
           id: 'item-' + Math.random().toString(36).substring(2, 8),
           orderId,
           productId: prod.id,
           productName: prod.nameAr || prod.name,
           productImage: prod.image,
-          unitPrice: prod.price,
+          unitPrice: unitPrice.toNumber(),
           quantity: i.quantity,
-          total: lineTotal,
+          total: lineTotal.toNumber(),
           selectedColor: i.selectedColor,
           lensOption: i.lensOption,
         };
       });
 
-      let discountAmount = 0;
+      let discountAmount = new Decimal(0);
       let validCouponCode: string | null = null;
       if (input.couponCode && input.couponCode.trim()) {
         const cpn = isolatedTestDb.coupons.find(
@@ -273,16 +397,17 @@ export class OrderService {
         );
         if (cpn) {
           validCouponCode = cpn.code;
+          const cVal = new Decimal(cpn.discountValue.toString());
           if (cpn.discountType === 'PERCENTAGE') {
-            discountAmount = (subtotal * cpn.discountValue) / 100;
+            discountAmount = subtotal.times(cVal).dividedBy(100).toDecimalPlaces(2);
           } else {
-            discountAmount = Math.min(cpn.discountValue, subtotal);
+            discountAmount = Decimal.min(cVal, subtotal).toDecimalPlaces(2);
           }
         }
       }
 
-      const shipping = subtotal >= 2000 ? 0 : 75;
-      const total = Math.max(0, subtotal - discountAmount + shipping);
+      const shipping = subtotal.greaterThanOrEqualTo(2000) ? new Decimal(0) : new Decimal(75);
+      const total = Decimal.max(0, subtotal.minus(discountAmount).plus(shipping)).toDecimalPlaces(2);
 
       const newOrder = {
         id: orderId,
@@ -294,15 +419,17 @@ export class OrderService {
         email: input.email.trim().toLowerCase(),
         address: input.address.trim(),
         city: input.city.trim(),
-        subtotal,
-        discount: discountAmount,
-        shipping,
-        total,
+        subtotal: subtotal.toNumber(),
+        discount: discountAmount.toNumber(),
+        shipping: shipping.toNumber(),
+        total: total.toNumber(),
         couponCode: validCouponCode,
         paymentMethod: 'COD',
         paymentStatus: 'UNPAID',
         orderStatus: 'PENDING',
         notes: input.notes || null,
+        paidAt: null,
+        paidBy: null,
         createdAt: new Date(),
         updatedAt: new Date(),
         items,
@@ -310,7 +437,7 @@ export class OrderService {
 
       isolatedTestDb.orders.unshift(newOrder);
       return {
-        order: newOrder,
+        order: this.sanitizeOrderConfirmation(newOrder),
         trackingToken: rawToken,
         isDuplicate: false,
       };
@@ -320,6 +447,7 @@ export class OrderService {
   /**
    * Secure Customer Order Tracking.
    * Verifies tracking token against stored hash using constant-time comparison.
+   * STRICTLY transmits token via X-Tracking-Token header (rejects query-string tokens).
    * Returns ONLY non-sensitive, necessary status and progress information.
    * NEVER exposes customer address, phone, email, internal DB IDs, or private data.
    */
@@ -345,17 +473,17 @@ export class OrderService {
       throw { statusCode: 401, message: 'رمز التتبع غير صحيح أو غير مصرح به لهذا الطلب.' };
     }
 
-    // Sanitize output strictly: NEVER return address, phone, email, or DB IDs
+    // Sanitize output strictly: NEVER return full address, phone, email, internal DB IDs, or token hash
     return {
       orderNumber: order.orderNumber,
       orderStatus: order.orderStatus,
       paymentMethod: order.paymentMethod,
       paymentStatus: order.paymentStatus,
       city: order.city,
-      subtotal: order.subtotal,
-      discount: order.discount,
-      shipping: order.shipping,
-      total: order.total,
+      subtotal: new Decimal(order.subtotal?.toString() || '0').toNumber(),
+      discount: new Decimal(order.discount?.toString() || '0').toNumber(),
+      shipping: new Decimal(order.shipping?.toString() || '0').toNumber(),
+      total: new Decimal(order.total?.toString() || '0').toNumber(),
       createdAt: order.createdAt,
       estimatedDelivery:
         order.orderStatus === 'DELIVERED'
@@ -365,12 +493,12 @@ export class OrderService {
           : 'خلال 2 إلى 4 أيام عمل (الدفع عند الاستلام)',
       items: order.items.map((item: any) => ({
         productName: item.productName,
-        productImage: item.productImage,
-        unitPrice: item.unitPrice,
+        productImage: item.productImage || '',
+        unitPrice: new Decimal(item.unitPrice?.toString() || '0').toNumber(),
         quantity: item.quantity,
-        total: item.total,
-        selectedColor: item.selectedColor,
-        lensOption: item.lensOption,
+        total: new Decimal(item.total?.toString() || '0').toNumber(),
+        selectedColor: item.selectedColor || null,
+        lensOption: item.lensOption || null,
       })),
     };
   }
@@ -478,18 +606,130 @@ export class OrderService {
   }
 
   /**
+   * Admin-Only: Dedicated Cash Collection Action for Cash on Delivery (COD) orders.
+   * Transactional, idempotent, logs paidAt and paidBy, records in audit history.
+   * Strictly enforces: Order must be DELIVERED before cash collection can be confirmed.
+   */
+  async collectCash(idOrNumber: string, actor: AdminActor = {}) {
+    const actorIdentifier = actor.email || actor.name || 'ADMIN';
+
+    if (isPostgresConnected) {
+      return prisma.$transaction(async (tx) => {
+        const order = await tx.order.findFirst({
+          where: {
+            OR: [{ id: idOrNumber }, { orderNumber: idOrNumber }],
+          },
+          include: { items: true },
+        });
+
+        if (!order) {
+          throw { statusCode: 404, message: 'الطلب غير موجود.' };
+        }
+
+        // Prevent cash collection on cancelled orders
+        if (order.orderStatus === 'CANCELLED') {
+          throw { statusCode: 400, message: 'لا يمكن تحصيل نقدية لطلب ملغي.' };
+        }
+
+        // Must be DELIVERED before cash collection
+        if (order.orderStatus !== 'DELIVERED') {
+          throw {
+            statusCode: 400,
+            message: `لا يمكن تأكيد تحصيل النقدية لطلبات الدفع عند الاستلام إلا بعد تسليم الطلب للعميل فعلياً (حالة الطلب الحالية: ${order.orderStatus}).`,
+          };
+        }
+
+        // Idempotent check: if already collected, return existing state
+        if (order.paymentStatus === 'PAID') {
+          return {
+            order,
+            alreadyPaid: true,
+            message: `تم تحصيل النقدية لهذا الطلب مسبقاً بواسطة ${order.paidBy || 'المسؤول'}.`,
+          };
+        }
+
+        const paidAt = new Date();
+        const updated = await tx.order.update({
+          where: { id: order.id },
+          data: {
+            paymentStatus: 'PAID',
+            paidAt,
+            paidBy: actorIdentifier,
+          },
+          include: { items: true },
+        });
+
+        // Audit Trail
+        await tx.orderStatusHistory.create({
+          data: {
+            orderId: order.id,
+            fromStatus: order.orderStatus,
+            toStatus: order.orderStatus,
+            changedBy: actorIdentifier,
+            notes: `Cash on Delivery (COD) payment collected and confirmed by ${actorIdentifier}.`,
+          },
+        });
+
+        return {
+          order: updated,
+          alreadyPaid: false,
+          message: 'تم تأكيد تحصيل النقدية بنجاح وتسجيل العملية في سجل التدقيق.',
+        };
+      });
+    } else {
+      // Test Harness
+      const order = isolatedTestDb.orders.find(
+        (o) => o.id === idOrNumber || o.orderNumber === idOrNumber
+      );
+      if (!order) throw { statusCode: 404, message: 'الطلب غير موجود.' };
+
+      if (order.orderStatus === 'CANCELLED') {
+        throw { statusCode: 400, message: 'لا يمكن تحصيل نقدية لطلب ملغي.' };
+      }
+
+      if (order.orderStatus !== 'DELIVERED') {
+        throw {
+          statusCode: 400,
+          message: `لا يمكن تأكيد تحصيل النقدية لطلبات الدفع عند الاستلام إلا بعد تسليم الطلب للعميل فعلياً (حالة الطلب الحالية: ${order.orderStatus}).`,
+        };
+      }
+
+      if (order.paymentStatus === 'PAID') {
+        return {
+          order,
+          alreadyPaid: true,
+          message: `تم تحصيل النقدية لهذا الطلب مسبقاً بواسطة ${order.paidBy || 'المسؤول'}.`,
+        };
+      }
+
+      order.paymentStatus = 'PAID';
+      order.paidAt = new Date();
+      order.paidBy = actorIdentifier;
+      order.updatedAt = new Date();
+
+      return {
+        order,
+        alreadyPaid: false,
+        message: 'تم تأكيد تحصيل النقدية بنجاح وتسجيل العملية في سجل التدقيق.',
+      };
+    }
+  }
+
+  /**
    * Admin-Only: Updates order status and payment status in an atomic transaction.
    * Validates state machine rules, COD payment collection rules, and restores stock on cancellation.
    */
-  async updateOrderStatus(id: string, update: UpdateOrderStatusInput, actor: AdminActor = {}) {
+  async updateOrderStatus(idOrNumber: string, update: UpdateOrderStatusInput, actor: AdminActor = {}) {
     const actorIdentifier = actor.email || actor.name || 'ADMIN';
     const targetStatus = update.orderStatus.toUpperCase();
 
     if (isPostgresConnected) {
       return prisma.$transaction(async (tx) => {
         // 1. Fetch current order with row items inside transaction
-        const order = await tx.order.findUnique({
-          where: { id },
+        const order = await tx.order.findFirst({
+          where: {
+            OR: [{ id: idOrNumber }, { orderNumber: idOrNumber }],
+          },
           include: { items: true },
         });
 
@@ -513,6 +753,9 @@ export class OrderService {
         // 3. Payment Status Rules (COD):
         // Cash collection (PAID) is ONLY allowed when order is DELIVERED
         let resolvedPaymentStatus = order.paymentStatus;
+        let paidAt = order.paidAt;
+        let paidBy = order.paidBy;
+
         if (update.paymentStatus) {
           const targetPayment = update.paymentStatus.toUpperCase();
           if (targetPayment === 'PAID') {
@@ -521,6 +764,10 @@ export class OrderService {
                 statusCode: 400,
                 message: 'لا يمكن تعيين حالة الدفع "مدفوع (PAID)" لطلبات الدفع عند الاستلام (COD) إلا بعد تسليم الطلب للعميل فعلياً (DELIVERED).',
               };
+            }
+            if (order.paymentStatus !== 'PAID') {
+              paidAt = new Date();
+              paidBy = actorIdentifier;
             }
           }
           resolvedPaymentStatus = targetPayment;
@@ -588,6 +835,8 @@ export class OrderService {
           data: {
             orderStatus: targetStatus,
             paymentStatus: resolvedPaymentStatus,
+            paidAt,
+            paidBy,
             notes: update.notes !== undefined ? update.notes : order.notes,
           },
           include: { items: true },
@@ -610,7 +859,9 @@ export class OrderService {
       });
     } else {
       // --- Test Harness Fallback ---
-      const order = isolatedTestDb.orders.find((o) => o.id === id);
+      const order = isolatedTestDb.orders.find(
+        (o) => o.id === idOrNumber || o.orderNumber === idOrNumber
+      );
       if (!order) throw { statusCode: 404, message: 'الطلب غير موجود.' };
 
       const currentStatus = order.orderStatus.toUpperCase();
@@ -631,6 +882,10 @@ export class OrderService {
             statusCode: 400,
             message: 'لا يمكن تعيين حالة الدفع "مدفوع (PAID)" لطلبات الدفع عند الاستلام (COD) إلا بعد تسليم الطلب للعميل فعلياً (DELIVERED).',
           };
+        }
+        if (order.paymentStatus !== 'PAID') {
+          order.paidAt = new Date();
+          order.paidBy = actorIdentifier;
         }
       }
 

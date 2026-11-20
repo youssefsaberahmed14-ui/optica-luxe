@@ -8,16 +8,24 @@ async function main() {
   console.log('🌱 Starting Optica Luxe database seed...');
 
   // 1. Seed Admin User
-  const adminEmail = (env.adminEmail || 'admin@optica-luxe.com').toLowerCase();
-  const adminPassword = env.adminPassword || (env.isProduction ? null : 'Admin@Dev2026!');
+  let adminEmail: string | undefined = env.adminEmail;
+  let adminPassword: string | undefined = env.adminPassword;
 
-  if (env.isProduction && !adminPassword) {
-    console.warn('⚠️ [Seed] In production, ADMIN_EMAIL and ADMIN_PASSWORD must be explicitly provided in environment.');
-  } else if (adminPassword) {
+  if (env.isProduction) {
+    if (!adminEmail || !adminPassword) {
+      console.warn('⚠️ [Seed] In production, ADMIN_EMAIL and ADMIN_PASSWORD must be explicitly provided in environment.');
+    }
+  } else {
+    // Development fallback
+    adminEmail = adminEmail || 'admin@optica-luxe.com';
+    adminPassword = adminPassword || 'Admin@Dev2026!';
+  }
+
+  if (adminEmail && adminPassword) {
     const passwordHash = await bcrypt.hash(adminPassword, 12);
 
     const admin = await prisma.adminUser.upsert({
-      where: { email: adminEmail },
+      where: { email: adminEmail.toLowerCase() },
       update: {
         name: env.adminName || 'Optica Luxe Administrator',
         passwordHash,
@@ -25,7 +33,7 @@ async function main() {
       },
       create: {
         name: env.adminName || 'Optica Luxe Administrator',
-        email: adminEmail,
+        email: adminEmail.toLowerCase(),
         passwordHash,
         role: 'SUPERADMIN',
       },
@@ -34,7 +42,7 @@ async function main() {
     console.log(`✅ Seeded admin user: ${admin.email}`);
   }
 
-  // 2. Seed Coupons
+  // 2. Seed Coupons (using Decimal values)
   const coupons = [
     {
       code: 'LUXE2026',
@@ -99,159 +107,93 @@ async function main() {
       isFeatured: true,
       isNew: true,
       isBestSeller: true,
-      rating: 4.9,
-      reviewCount: 38,
+      rating: 4.95,
+      reviewCount: 24,
       colors: [
-        { name: 'Pure Gold 18K', nameAr: 'ذهب خالص 18 قيراط', code: '#D4AF37' },
-        { name: 'Rose Gold', nameAr: 'ذهب وردي فاخر', code: '#B76E79' },
+        { name: '18K Yellow Gold', nameAr: 'ذهب أصفر عيار 18', code: '#D4AF37' },
+        { name: 'Platinum Finish', nameAr: 'بلاتين خالص', code: '#E5E4E2' },
       ],
       dimensions: { lensWidth: 58, bridgeWidth: 16, templeLength: 140 },
     },
     {
-      sku: 'TF-SND-0237',
-      name: 'Tom Ford FT0237 Snowdon Italian Acetate',
-      nameAr: 'توم فورد سنودون أسيتات إيطالي',
-      description: 'Iconic James Bond eyewear in heavy Italian acetate with signature T logo.',
-      descriptionAr: 'النظارة الشهيرة التي ظهرت في أفلام جيمس بوند. تتميز بتوقيع حرف T الأيقوني المعدني على الجوانب، وهيكل من الأسيتات الإيطالي الكثيف لمتانة استثنائية.',
-      price: 1950,
-      oldPrice: 2300,
-      discountPercent: 15,
+      sku: 'GUC-GG-HAV-02',
+      name: 'Gucci Horsebit Vintage Havana',
+      nameAr: 'غوتشي هورسبت هافانا كلاسيك',
+      description: 'Elegant oversized acetate frame featuring the iconic Gucci gold-tone horsebit.',
+      descriptionAr: 'نظارة شمسية راقية من غوتشي بتصميم هافانا متدرج مزينة بشعار هورسبيت الذهبي الفاخر على الذراعين، تمنحك إطلالة ملكية وحماية كاملة من الأشعة فوق البنفسجية.',
+      price: 3600,
+      oldPrice: 4200,
+      discountPercent: 14,
       image: 'https://images.unsplash.com/photo-1572635196237-14b3f281503f?auto=format&fit=crop&w=800&q=80',
       images: [
         'https://images.unsplash.com/photo-1572635196237-14b3f281503f?auto=format&fit=crop&w=1200&q=85',
-      ],
-      category: 'sunglasses',
-      categoryAr: 'نظارات شمسية',
-      brand: 'Tom Ford',
-      brandAr: 'توم فورد',
-      stock: 14,
-      shape: 'square',
-      shapeAr: 'مربع كلاسيكي',
-      material: 'acetate',
-      materialAr: 'أسيتات إيطالي مقطوع يدوياً',
-      gender: 'men',
-      genderAr: 'رجالي',
-      isFeatured: true,
-      isNew: false,
-      isBestSeller: true,
-      rating: 4.8,
-      reviewCount: 94,
-      colors: [
-        { name: 'Dark Havana', nameAr: 'هافانا داكن (تورتويز)', code: '#3E2723' },
-        { name: 'Obsidian Black', nameAr: 'أسود فحمي ملكي', code: '#121212' },
-      ],
-      dimensions: { lensWidth: 52, bridgeWidth: 20, templeLength: 145 },
-    },
-    {
-      sku: 'LND-AIR-TM-49',
-      name: 'Lindberg Titanium Air Rim Minimalist',
-      nameAr: 'ليندبيرغ إير ريم تيتانيوم طبي',
-      description: 'Danish engineering masterpiece. Featherlight 2.8g pure medical titanium without screws.',
-      descriptionAr: 'قمة الهندسة الدنماركية في عالم البصريات. وزن لا يتعدى 2.8 غرام، بدون أي مسامير أو لحام تقليدي. راحة لا تضاهى طوال اليوم.',
-      price: 3200,
-      oldPrice: 3500,
-      discountPercent: 8,
-      image: 'https://images.unsplash.com/photo-1577803645773-f96470509666?auto=format&fit=crop&w=800&q=80',
-      images: [
-        'https://images.unsplash.com/photo-1577803645773-f96470509666?auto=format&fit=crop&w=1200&q=85',
-      ],
-      category: 'eyeglasses',
-      categoryAr: 'نظارات طبية',
-      brand: 'Lindberg',
-      brandAr: 'ليندبيرغ الدنماركية',
-      stock: 5,
-      shape: 'round',
-      shapeAr: 'دائري نيوكلاسيك',
-      material: 'titanium',
-      materialAr: 'تيتانيوم نقي 100% خالي من المسامير',
-      gender: 'unisex',
-      genderAr: 'للجنسين',
-      isFeatured: true,
-      isNew: true,
-      isBestSeller: false,
-      rating: 5.0,
-      reviewCount: 42,
-      colors: [
-        { name: 'Brushed Titanium', nameAr: 'تيتانيوم رمادي مصقول', code: '#78909C' },
-      ],
-      dimensions: { lensWidth: 49, bridgeWidth: 21, templeLength: 145 },
-    },
-    {
-      sku: 'GCC-HRS-HEX-04',
-      name: 'Gucci Horsebit Geometric Gradient',
-      nameAr: 'غوتشي هورسبت هندسية متدرجة',
-      description: 'Bold feminine Italian design with sculpted gold horsebit icon and gradient UV400 lenses.',
-      descriptionAr: 'تصميم جريء ومفعم بالأنوثة الطاغية من غوتشي. إطار هندسي فريد مع شعار لجام الحصان الشهير بالذهب البراق.',
-      price: 2450,
-      oldPrice: 2890,
-      discountPercent: 15,
-      image: 'https://images.unsplash.com/photo-1591076482161-42ce6da69f67?auto=format&fit=crop&w=800&q=80',
-      images: [
-        'https://images.unsplash.com/photo-1591076482161-42ce6da69f67?auto=format&fit=crop&w=1200&q=85',
+        'https://images.unsplash.com/photo-1508296695146-257a814070b4?auto=format&fit=crop&w=1200&q=85',
       ],
       category: 'sunglasses',
       categoryAr: 'نظارات شمسية',
       brand: 'Gucci',
       brandAr: 'غوتشي',
-      stock: 10,
-      shape: 'hexagonal',
-      shapeAr: 'سداسي هندسي عصري',
+      stock: 12,
+      shape: 'square',
+      shapeAr: 'مربع عصري',
       material: 'acetate',
-      materialAr: 'أسيتات لامع فائق الجودة',
+      materialAr: 'أسيتات إيطالي فاخر',
       gender: 'women',
       genderAr: 'نسائي',
       isFeatured: true,
-      isNew: true,
-      isBestSeller: true,
-      rating: 4.9,
-      reviewCount: 61,
-      colors: [
-        { name: 'Glossy Black Gold', nameAr: 'أسود لامع مع شعار ذهبي', code: '#000000' },
-      ],
-      dimensions: { lensWidth: 55, bridgeWidth: 18, templeLength: 140 },
-    },
-    {
-      sku: 'PRD-LNR-SPT-05',
-      name: 'Prada Linea Rossa Ultralight Sport',
-      nameAr: 'برادا لينيا روسا رياضية فائقة الخفة',
-      description: 'Sport performance meets luxury. Polarized high-contrast lenses with composite carbon fiber.',
-      descriptionAr: 'أداء رياضي عالي المستوى مع لمسة الفخامة الإيطالية المميزة لخط لينيا روسا. عدسات مستقطبة تحجب الوهج بالكامل.',
-      price: 1650,
-      oldPrice: 1950,
-      discountPercent: 15,
-      image: 'https://images.unsplash.com/photo-1506152983158-b4a74a01c721?auto=format&fit=crop&w=800&q=80',
-      images: [
-        'https://images.unsplash.com/photo-1506152983158-b4a74a01c721?auto=format&fit=crop&w=1200&q=85',
-      ],
-      category: 'sunglasses',
-      categoryAr: 'نظارات شمسية',
-      brand: 'Prada',
-      brandAr: 'برادا',
-      stock: 12,
-      shape: 'rectangle',
-      shapeAr: 'مستطيل ديناميكي',
-      material: 'carbon-fiber',
-      materialAr: 'ألياف كربونية مركبة',
-      gender: 'men',
-      genderAr: 'رجالي',
-      isFeatured: false,
       isNew: false,
       isBestSeller: true,
-      rating: 4.7,
-      reviewCount: 78,
+      rating: 4.9,
+      reviewCount: 31,
       colors: [
-        { name: 'Matte Graphite', nameAr: 'جرافيت مطفي رياضي', code: '#424242' },
+        { name: 'Dark Havana Tortoise', nameAr: 'هافانا داكن', code: '#3E2723' },
+        { name: 'Glossy Onyx Black', nameAr: 'أسود أونيكس لامع', code: '#111111' },
       ],
-      dimensions: { lensWidth: 59, bridgeWidth: 15, templeLength: 145 },
+      dimensions: { lensWidth: 54, bridgeWidth: 18, templeLength: 145 },
     },
     {
-      sku: 'OP-GP-RT-06',
-      name: 'Oliver Peoples Gregory Peck Vintage Acetate',
-      nameAr: 'أوليفر بيبولز غريغوري بيك كلاسيك',
-      description: 'Timeless retro keyhole bridge optical eyewear inspired by Gregory Peck.',
-      descriptionAr: 'تصميم أيقوني مستوحى من النظارة التي ارتداها الممثل الأسطوري غريغوري بيك. جسر بنمط ثقب المفتاح وتفاصيل كلاسيكية لا تزول مع الزمن.',
-      price: 2100,
-      oldPrice: 2400,
+      sku: 'PRD-SYM-BLK-03',
+      name: 'Prada Symbole Geometric Titanium',
+      nameAr: 'برادا سيمبول تيتانيوم هندسي',
+      description: 'Ultra-lightweight titanium optical frames with sculptural geometric temples.',
+      descriptionAr: 'إطار طبي متطور يجمع بين خفة التيتانيوم المذهلة والصلابة الفائقة مع لمسات دار برادا الهندسية الجريئة لتناسب أسلوب الحياة الراقي والعملي.',
+      price: 4200,
+      oldPrice: null,
+      discountPercent: null,
+      image: 'https://images.unsplash.com/photo-1591076482161-42ce6da69f67?auto=format&fit=crop&w=800&q=80',
+      images: [
+        'https://images.unsplash.com/photo-1591076482161-42ce6da69f67?auto=format&fit=crop&w=1200&q=85',
+      ],
+      category: 'eyeglasses',
+      categoryAr: 'نظارات طبية',
+      brand: 'Prada',
+      brandAr: 'برادا',
+      stock: 10,
+      shape: 'hexagonal',
+      shapeAr: 'مسدس هندسي',
+      material: 'titanium',
+      materialAr: 'تيتانيوم ياباني فائق الخفة',
+      gender: 'men',
+      genderAr: 'رجالي',
+      isFeatured: true,
+      isNew: true,
+      isBestSeller: false,
+      rating: 4.88,
+      reviewCount: 19,
+      colors: [
+        { name: 'Matte Gunmetal', nameAr: 'رمادي بركاني مطفي', code: '#424242' },
+        { name: 'Brushed Gold', nameAr: 'ذهبي مسامي', code: '#C5A059' },
+      ],
+      dimensions: { lensWidth: 52, bridgeWidth: 19, templeLength: 142 },
+    },
+    {
+      sku: 'TF-FT5634-HAV-04',
+      name: 'Tom Ford Private Eyewear Collection',
+      nameAr: 'توم فورد برايفت كولكشن أسيتات',
+      description: 'Signature Tom Ford T-logo optical frame in rich Japanese hand-polished acetate.',
+      descriptionAr: 'فخامة مطلقة مستوحاة من المجموعة الخاصة للمصمم توم فورد. تفاصيل معدن التيتانيوم الأيقوني T على المفصلات تعكس الفخامة الصامتة والذوق الرفيع.',
+      price: 3950,
+      oldPrice: 4500,
       discountPercent: 12,
       image: 'https://images.unsplash.com/photo-1508296695146-257a814070b4?auto=format&fit=crop&w=800&q=80',
       images: [
@@ -259,24 +201,92 @@ async function main() {
       ],
       category: 'eyeglasses',
       categoryAr: 'نظارات طبية',
-      brand: 'Oliver Peoples',
-      brandAr: 'أوليفر بيبولز',
-      stock: 9,
-      shape: 'round',
-      shapeAr: 'دائري ريترو مع جسر مفتاح',
+      brand: 'Tom Ford',
+      brandAr: 'توم فورد',
+      stock: 15,
+      shape: 'rectangle',
+      shapeAr: 'مستطيل كلاسيكي',
       material: 'acetate',
-      materialAr: 'أسيتات عضوي مخصص مصنع في اليابان',
+      materialAr: 'أسيتات عضوي مصقول يدوياً',
       gender: 'unisex',
       genderAr: 'للجنسين',
       isFeatured: true,
       isNew: false,
       isBestSeller: true,
-      rating: 4.9,
-      reviewCount: 52,
+      rating: 4.92,
+      reviewCount: 42,
       colors: [
-        { name: 'Raintree Tortoise', nameAr: 'تورتويز كلاسيكي عتيق', code: '#4E342E' },
+        { name: 'Amber Tortoise', nameAr: 'كهرمان تورتويز', code: '#5D4037' },
+        { name: 'Classic Black', nameAr: 'أسود كلاسيكي', code: '#000000' },
       ],
-      dimensions: { lensWidth: 47, bridgeWidth: 23, templeLength: 150 },
+      dimensions: { lensWidth: 53, bridgeWidth: 17, templeLength: 145 },
+    },
+    {
+      sku: 'RB-AV-POL-05',
+      name: 'Ray-Ban Aviator Classic Polarized',
+      nameAr: 'ريبان أفياتور كلاسيك مستقطبة',
+      description: 'The world most iconic sunglasses model with G-15 polarized crystal lenses.',
+      descriptionAr: 'النظارة الأكثر شهرة في تاريخ البصريات منذ عام 1937. إطار ذهبي نحيف مع عدسات كريستالية G-15 الخضراء المستقطبة لمنع التوهج بنسبة 100%.',
+      price: 2450,
+      oldPrice: 2800,
+      discountPercent: 12,
+      image: 'https://images.unsplash.com/photo-1473496169904-658ba7c44d8a?auto=format&fit=crop&w=800&q=80',
+      images: [
+        'https://images.unsplash.com/photo-1473496169904-658ba7c44d8a?auto=format&fit=crop&w=1200&q=85',
+      ],
+      category: 'sunglasses',
+      categoryAr: 'نظارات شمسية',
+      brand: 'Ray-Ban',
+      brandAr: 'ريبان',
+      stock: 25,
+      shape: 'aviator',
+      shapeAr: 'أفياتور قطرة ماء',
+      material: 'metal',
+      materialAr: 'سبيكة معدنية مرنة',
+      gender: 'unisex',
+      genderAr: 'للجنسين',
+      isFeatured: false,
+      isNew: false,
+      isBestSeller: true,
+      rating: 4.96,
+      reviewCount: 88,
+      colors: [
+        { name: 'Gold Frame / G-15 Green', nameAr: 'إطار ذهبي / عدسات خضراء', code: '#D4AF37' },
+        { name: 'Black Frame / Polarized Grey', nameAr: 'إطار أسود / عدسات رمادية', code: '#212121' },
+      ],
+      dimensions: { lensWidth: 58, bridgeWidth: 14, templeLength: 135 },
+    },
+    {
+      sku: 'CL-ACUVUE-OASYS-06',
+      name: 'Acuvue Oasys with HydraLuxe (6 Lenses)',
+      nameAr: 'عدسات أكيوفيو أواسيس هيدرالوكس (6 عدسات)',
+      description: 'Premium daily-wear silicone hydrogel contact lenses for dry eyes.',
+      descriptionAr: 'عدسات لاصقة طبية بتقنية هيدرالوكس الثورية المصممة لترطيب دائم وراحة فائقة طوال اليوم حتى أمام الشاشات الرقمية. حماية عالية من الأشعة فوق البنفسجية.',
+      price: 850,
+      oldPrice: 950,
+      discountPercent: 10,
+      image: 'https://images.unsplash.com/photo-1577401239170-897942555fb3?auto=format&fit=crop&w=800&q=80',
+      images: [
+        'https://images.unsplash.com/photo-1577401239170-897942555fb3?auto=format&fit=crop&w=1200&q=85',
+      ],
+      category: 'contact-lenses',
+      categoryAr: 'عدسات لاصقة',
+      brand: 'Acuvue',
+      brandAr: 'أكيوفيو',
+      stock: 40,
+      shape: null,
+      shapeAr: null,
+      material: 'silicone-hydrogel',
+      materialAr: 'سيليكون هيدروجيل متطور',
+      gender: 'unisex',
+      genderAr: 'للجنسين',
+      isFeatured: false,
+      isNew: true,
+      isBestSeller: false,
+      rating: 4.85,
+      reviewCount: 16,
+      colors: null,
+      dimensions: null,
     },
   ];
 
@@ -287,14 +297,14 @@ async function main() {
       create: p,
     });
   }
-  console.log(`✅ Seeded ${products.length} products.`);
 
-  console.log('🎉 Seed completed successfully!');
+  console.log(`✅ Seeded ${products.length} luxury optical products.`);
+  console.log('✨ Database seed completed successfully!');
 }
 
 main()
   .catch((e) => {
-    console.error('Seed error:', e);
+    console.error('❌ Database seed error:', e);
     process.exit(1);
   })
   .finally(async () => {

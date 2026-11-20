@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { orderController } from '../controllers/order.controller';
 import { authenticateAdmin } from '../middleware/auth.middleware';
+import { checkoutRateLimiter, trackingRateLimiter } from '../middleware/rate-limit.middleware';
 import { validateRequest } from '../middleware/validate.middleware';
 import { createOrderSchema, updateOrderStatusSchema } from '../validators/order.validator';
 
@@ -8,12 +9,17 @@ const router = Router();
 
 // --- Public Customer Routes ---
 
-// 1. Customer Checkout (Enforces COD, atomic stock check, returns unguessable tracking token)
-router.post('/', validateRequest(createOrderSchema), orderController.create);
+// 1. Customer Checkout (Enforces COD, atomic stock check, rate limited, returns unguessable tracking token)
+router.post(
+  '/',
+  checkoutRateLimiter,
+  validateRequest(createOrderSchema),
+  orderController.create
+);
 
-// 2. Customer Secure Order Tracking (Requires valid tracking token, returns minimal public data)
-router.get('/track/:orderNumber', orderController.track);
-router.post('/track', orderController.track);
+// 2. Customer Secure Order Tracking (STRICTLY requires X-Tracking-Token header, rejects query string tokens)
+router.get('/track/:orderNumber', trackingRateLimiter, orderController.track);
+router.post('/track', trackingRateLimiter, orderController.track);
 
 // --- Protected Admin Routes (STRICTLY require valid JWT admin authentication) ---
 
@@ -30,5 +36,8 @@ router.patch(
   validateRequest(updateOrderStatusSchema),
   orderController.updateStatus
 );
+
+// 6. Dedicated Cash on Delivery Cash Collection Action (Protected: transactional & idempotent)
+router.post('/:id/collect-cash', authenticateAdmin, orderController.collectCash);
 
 export default router;

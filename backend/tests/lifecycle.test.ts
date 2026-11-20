@@ -1,9 +1,9 @@
+import jsonwebtoken from 'jsonwebtoken';
 import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { env } from '../src/config/env';
 import { isolatedTestDb, seedIsolatedTestData } from '../src/database/prisma';
-import jsonwebtoken from 'jsonwebtoken';
 
 const app = createApp();
 
@@ -20,7 +20,7 @@ function getAdminToken(): string {
   );
 }
 
-describe('Issues 4 & 5: Order State Machine, Cancellation & COD Rules', () => {
+describe('Issues 4 & 5 & 8: Order State Machine, Cancellation, COD Rules & Dedicated Cash Collection', () => {
   let adminToken: string;
 
   beforeEach(async () => {
@@ -28,23 +28,22 @@ describe('Issues 4 & 5: Order State Machine, Cancellation & COD Rules', () => {
     adminToken = getAdminToken();
   });
 
-  it('new COD orders must start with paymentMethod=COD, paymentStatus=UNPAID, and orderStatus=PENDING', async () => {
+  it('New order creation must STRICTLY default to paymentMethod=COD and paymentStatus=UNPAID and orderStatus=PENDING', async () => {
     const res = await request(app)
       .post('/api/orders')
       .send({
-        customerName: 'حازم إمام',
-        phone: '01011112222',
-        email: 'hazem@example.com',
-        address: 'الزمالك، القاهرة',
-        city: 'القاهرة',
-        items: [{ productId: 'opt-001', quantity: 2 }],
+        customerName: 'حسام حسن',
+        phone: '01012345678',
+        email: 'hossam@example.com',
+        address: 'شارع الهرم، الجيزة',
+        city: 'الجيزة',
+        items: [{ productId: 'opt-001', quantity: 1 }],
       });
 
     expect(res.status).toBe(201);
-    const order = res.body.data;
-    expect(order.paymentMethod).toBe('COD');
-    expect(order.paymentStatus).toBe('UNPAID');
-    expect(order.orderStatus).toBe('PENDING');
+    expect(res.body.data.paymentMethod).toBe('COD');
+    expect(res.body.data.paymentStatus).toBe('UNPAID');
+    expect(res.body.data.orderStatus).toBe('PENDING');
   });
 
   it('should REJECT marking payment as PAID while order is PENDING, CONFIRMED, PROCESSING, or SHIPPED', async () => {
@@ -60,11 +59,11 @@ describe('Issues 4 & 5: Order State Machine, Cancellation & COD Rules', () => {
         items: [{ productId: 'opt-002', quantity: 1 }],
       });
 
-    const orderId = checkoutRes.body.data.id;
+    const orderNumber = checkoutRes.body.data.orderNumber;
 
     // 2. Try to mark as PAID while PENDING -> MUST FAIL
     const patchPendingPaid = await request(app)
-      .patch(`/api/orders/${orderId}/status`)
+      .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({
         orderStatus: 'PENDING',
@@ -76,12 +75,12 @@ describe('Issues 4 & 5: Order State Machine, Cancellation & COD Rules', () => {
 
     // 3. Confirm order, then try to mark PAID -> MUST FAIL
     await request(app)
-      .patch(`/api/orders/${orderId}/status`)
+      .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ orderStatus: 'CONFIRMED' });
 
     const patchConfirmedPaid = await request(app)
-      .patch(`/api/orders/${orderId}/status`)
+      .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({
         orderStatus: 'CONFIRMED',
@@ -92,17 +91,17 @@ describe('Issues 4 & 5: Order State Machine, Cancellation & COD Rules', () => {
 
     // 4. Ship order, then try to mark PAID before delivery -> MUST FAIL
     await request(app)
-      .patch(`/api/orders/${orderId}/status`)
+      .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ orderStatus: 'PROCESSING' });
 
     await request(app)
-      .patch(`/api/orders/${orderId}/status`)
+      .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ orderStatus: 'SHIPPED' });
 
     const patchShippedPaid = await request(app)
-      .patch(`/api/orders/${orderId}/status`)
+      .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({
         orderStatus: 'SHIPPED',
@@ -112,50 +111,69 @@ describe('Issues 4 & 5: Order State Machine, Cancellation & COD Rules', () => {
     expect(patchShippedPaid.status).toBe(400);
   });
 
-  it('should allow marking payment as PAID ONLY when order is DELIVERED and cash is collected', async () => {
-    // Place order
+  it('Dedicated Cash Collection (POST /api/orders/:id/collect-cash): should enforce DELIVERED status, record paidAt/paidBy, and be idempotent', async () => {
+    // 1. Create order
     const checkoutRes = await request(app)
       .post('/api/orders')
       .send({
-        customerName: 'شريف منير',
-        phone: '01033334444',
-        email: 'sherif@example.com',
-        address: 'مدينة نصر',
+        customerName: 'فاروق حسني',
+        phone: '01044445555',
+        email: 'farouk@example.com',
+        address: 'الزمالك',
         city: 'القاهرة',
         items: [{ productId: 'opt-001', quantity: 1 }],
       });
 
-    const orderId = checkoutRes.body.data.id;
+    const orderNumber = checkoutRes.body.data.orderNumber;
 
-    // Transition PENDING -> CONFIRMED -> PROCESSING -> SHIPPED -> DELIVERED
+    // 2. Unauthenticated attempt -> 401
+    const unauthCollect = await request(app).post(`/api/orders/${orderNumber}/collect-cash`);
+    expect(unauthCollect.status).toBe(401);
+
+    // 3. Attempt while still PENDING -> 400
+    const earlyCollect = await request(app)
+      .post(`/api/orders/${orderNumber}/collect-cash`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(earlyCollect.status).toBe(400);
+    expect(earlyCollect.body.message).toContain('لا يمكن تأكيد تحصيل النقدية');
+
+    // 4. Progress order to DELIVERED
     await request(app)
-      .patch(`/api/orders/${orderId}/status`)
+      .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ orderStatus: 'CONFIRMED' });
-
     await request(app)
-      .patch(`/api/orders/${orderId}/status`)
+      .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ orderStatus: 'PROCESSING' });
-
     await request(app)
-      .patch(`/api/orders/${orderId}/status`)
+      .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ orderStatus: 'SHIPPED' });
-
-    // Mark as DELIVERED with cash collected (PAID)
-    const deliverRes = await request(app)
-      .patch(`/api/orders/${orderId}/status`)
+    await request(app)
+      .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({
-        orderStatus: 'DELIVERED',
-        paymentStatus: 'PAID',
-        notes: 'تم استلام النقدية بالكامل من العميل عند التسليم.',
-      });
+      .send({ orderStatus: 'DELIVERED' });
 
-    expect(deliverRes.status).toBe(200);
-    expect(deliverRes.body.data.orderStatus).toBe('DELIVERED');
-    expect(deliverRes.body.data.paymentStatus).toBe('PAID');
+    // 5. Successful Cash Collection
+    const collectRes = await request(app)
+      .post(`/api/orders/${orderNumber}/collect-cash`)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(collectRes.status).toBe(200);
+    expect(collectRes.body.success).toBe(true);
+    expect(collectRes.body.alreadyPaid).toBe(false);
+    expect(collectRes.body.data.paymentStatus).toBe('PAID');
+    expect(collectRes.body.data.paidAt).toBeDefined();
+    expect(collectRes.body.data.paidBy).toBe('admin@optica-luxe.com');
+
+    // 6. Repeated collection call -> idempotent (alreadyPaid: true, no error)
+    const repeatCollect = await request(app)
+      .post(`/api/orders/${orderNumber}/collect-cash`)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(repeatCollect.status).toBe(200);
+    expect(repeatCollect.body.alreadyPaid).toBe(true);
   });
 
   it('should restore inventory exactly once upon order cancellation', async () => {
@@ -174,12 +192,12 @@ describe('Issues 4 & 5: Order State Machine, Cancellation & COD Rules', () => {
         items: [{ productId: 'opt-003', quantity: 2 }],
       });
 
-    const orderId = checkoutRes.body.data.id;
+    const orderNumber = checkoutRes.body.data.orderNumber;
     expect(prodBefore.stock).toBe(initialStock - 2); // 3
 
     // Cancel order
     const cancelRes = await request(app)
-      .patch(`/api/orders/${orderId}/status`)
+      .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({
         orderStatus: 'CANCELLED',
@@ -209,12 +227,12 @@ describe('Issues 4 & 5: Order State Machine, Cancellation & COD Rules', () => {
         items: [{ productId: 'opt-001', quantity: 1 }],
       });
 
-    const orderId = checkoutRes.body.data.id;
+    const orderNumber = checkoutRes.body.data.orderNumber;
     expect(prod.stock).toBe(initialStock - 1);
 
     // First cancel -> Restores stock back to initialStock
     const cancel1 = await request(app)
-      .patch(`/api/orders/${orderId}/status`)
+      .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ orderStatus: 'CANCELLED' });
     expect(cancel1.status).toBe(200);
@@ -222,7 +240,7 @@ describe('Issues 4 & 5: Order State Machine, Cancellation & COD Rules', () => {
 
     // Second cancel attempt -> Must NOT double-restore stock
     const cancel2 = await request(app)
-      .patch(`/api/orders/${orderId}/status`)
+      .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ orderStatus: 'CANCELLED' });
 
@@ -242,29 +260,29 @@ describe('Issues 4 & 5: Order State Machine, Cancellation & COD Rules', () => {
         items: [{ productId: 'opt-002', quantity: 1 }],
       });
 
-    const orderId = checkoutRes.body.data.id;
+    const orderNumber = checkoutRes.body.data.orderNumber;
 
     // Move to DELIVERED
     await request(app)
-      .patch(`/api/orders/${orderId}/status`)
+      .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ orderStatus: 'CONFIRMED' });
     await request(app)
-      .patch(`/api/orders/${orderId}/status`)
+      .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ orderStatus: 'PROCESSING' });
     await request(app)
-      .patch(`/api/orders/${orderId}/status`)
+      .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ orderStatus: 'SHIPPED' });
     await request(app)
-      .patch(`/api/orders/${orderId}/status`)
+      .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ orderStatus: 'DELIVERED', paymentStatus: 'PAID' });
 
     // Attempt to cancel DELIVERED order -> MUST BE REJECTED
     const cancelAttempt = await request(app)
-      .patch(`/api/orders/${orderId}/status`)
+      .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ orderStatus: 'CANCELLED' });
 

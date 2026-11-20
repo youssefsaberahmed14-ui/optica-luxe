@@ -87,7 +87,7 @@ describe('Issue 3 & 4: Concurrency Tests (Scenarios A & B)', () => {
         items: [{ productId: 'opt-003', quantity: 2 }],
       });
 
-    const orderId = checkoutRes.body.data.id;
+    const orderId = checkoutRes.body.data.orderNumber;
     expect(prod.stock).toBe(initialStock - 2); // 3
 
     // Fire two cancellation requests simultaneously
@@ -141,5 +141,32 @@ describe('Issue 3 & 4: Concurrency Tests (Scenarios A & B)', () => {
 
     // Stock must NOT have been deducted a second time
     expect(prod.stock).toBe(stockBefore - 1);
+  });
+
+  it('Idempotency violation: Reusing the same key with a DIFFERENT payload must be rejected with 409', async () => {
+    const idempotencyKey = 'checkout_idemp_key_diff_payload_test';
+
+    const initialPayload = {
+      customerName: 'طارق حسام',
+      phone: '01012345678',
+      email: 'tarek.hossam@example.com',
+      address: 'المعادي',
+      city: 'القاهرة',
+      items: [{ productId: 'opt-001', quantity: 1 }],
+      idempotencyKey,
+    };
+
+    const res1 = await request(app).post('/api/orders').send(initialPayload);
+    expect(res1.status).toBe(201);
+
+    // Reuse key with different customer name
+    const differentPayload = {
+      ...initialPayload,
+      customerName: 'شخص مختلف تماماً',
+    };
+
+    const res2 = await request(app).post('/api/orders').send(differentPayload);
+    expect(res2.status).toBe(409);
+    expect(res2.body.success).toBe(false);
   });
 });

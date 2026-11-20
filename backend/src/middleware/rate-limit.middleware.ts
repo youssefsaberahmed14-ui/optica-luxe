@@ -1,35 +1,52 @@
-import { NextFunction, Request, Response } from 'express';
+import rateLimit from 'express-rate-limit';
 import { env } from '../config/env';
 
-interface AttemptRecord {
-  count: number;
-  resetTime: number;
-}
+// In test environment, bypass rate limits to avoid throttling automated test suites
+const isTest = env.isTest;
 
-const loginAttempts = new Map<string, AttemptRecord>();
+/**
+ * Rate Limiter for Authentication endpoints (login, refresh)
+ */
+export const authRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: isTest ? 10000 : 10, // Max 10 attempts per 15 minutes in production
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'تم تجاوز الحد الأقصى لمحاولات تسجيل الدخول. يرجى المحاولة بعد 15 دقيقة.',
+  },
+  skip: () => isTest,
+});
 
-// Simple in-memory rate limiter for login route
-export const loginRateLimiter = (req: Request, res: Response, next: NextFunction) => {
-  const ip = req.ip || req.socket.remoteAddress || 'unknown';
-  const now = Date.now();
-  const record = loginAttempts.get(ip);
+export const loginRateLimiter = authRateLimiter;
 
-  if (!record || now > record.resetTime) {
-    loginAttempts.set(ip, {
-      count: 1,
-      resetTime: now + env.rateLimitWindowMs,
-    });
-    return next();
-  }
+/**
+ * Rate Limiter for Public Order Checkout
+ */
+export const checkoutRateLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  max: isTest ? 10000 : 25, // Max 25 checkouts per IP in 10 minutes
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'تم استقبال عدد كبير من الطلبات من هذا العنوان. يرجى الانتظار قليلاً قبل المحاولة مرة أخرى.',
+  },
+  skip: () => isTest,
+});
 
-  if (record.count >= env.rateLimitMaxAttempts) {
-    const minutesLeft = Math.ceil((record.resetTime - now) / 60000);
-    return res.status(429).json({
-      success: false,
-      message: `تم تجاوز الحد المسموح به من محاولات تسجيل الدخول. يرجى الانتظار لمدة ${minutesLeft} دقيقة قبل المحاولة مجدداً.`,
-    });
-  }
-
-  record.count++;
-  next();
-};
+/**
+ * Rate Limiter for Order Tracking queries
+ */
+export const trackingRateLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000, // 10 minutes
+  max: isTest ? 10000 : 60, // Max 60 queries per 10 minutes
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'تم تجاوز الحد الأقصى لاستعلامات التتبع. يرجى المحاولة لاحقاً.',
+  },
+  skip: () => isTest,
+});

@@ -6,12 +6,12 @@ import { seedIsolatedTestData } from '../src/database/prisma';
 
 const app = createApp();
 
-describe('Issue 1: Secure Customer Order Tracking & Authorization', () => {
+describe('Issue 1 & 3: Secure Customer Order Tracking, Sanitized DTO & Header-Based Auth', () => {
   beforeEach(async () => {
     await seedIsolatedTestData();
   });
 
-  it('should return a raw tracking token only once upon successful order creation', async () => {
+  it('Sanitized DTO: should return raw tracking token only once and NEVER expose DB IDs, token hash or customer PII in checkout response', async () => {
     const res = await request(app)
       .post('/api/orders')
       .send({
@@ -27,17 +27,26 @@ describe('Issue 1: Secure Customer Order Tracking & Authorization', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.data.orderNumber).toBeDefined();
 
-    // Raw tracking token is returned in the checkout response
+    // Raw tracking token is returned in the root response only once
     expect(res.body.trackingToken).toBeDefined();
     expect(typeof res.body.trackingToken).toBe('string');
     expect(res.body.trackingToken.length).toBe(64); // 32 bytes hex = 64 characters
 
-    // Complete order record in DB must not expose raw token in plain text
-    expect(res.body.data.trackingTokenHash).toBeDefined();
-    expect(res.body.data.trackingTokenHash).not.toBe(res.body.trackingToken);
+    // Critical Security Assertions: Data DTO must NOT expose internal DB IDs, customer PII, or token hash
+    expect(res.body.data.id).toBeUndefined();
+    expect(res.body.data.trackingTokenHash).toBeUndefined();
+    expect(res.body.data.customerName).toBeUndefined();
+    expect(res.body.data.phone).toBeUndefined();
+    expect(res.body.data.email).toBeUndefined();
+    expect(res.body.data.address).toBeUndefined();
+
+    // Verify order item in DTO does not leak internal DB IDs
+    expect(res.body.data.items[0].id).toBeUndefined();
+    expect(res.body.data.items[0].orderId).toBeUndefined();
+    expect(res.body.data.items[0].productId).toBeUndefined();
   });
 
-  it('should allow customer to track their order with valid orderNumber and trackingToken', async () => {
+  it('Header-Based Tracking: should allow tracking using X-Tracking-Token header', async () => {
     // 1. Place order
     const checkoutRes = await request(app)
       .post('/api/orders')
@@ -53,10 +62,10 @@ describe('Issue 1: Secure Customer Order Tracking & Authorization', () => {
     const orderNumber = checkoutRes.body.data.orderNumber;
     const trackingToken = checkoutRes.body.trackingToken;
 
-    // 2. Track with token
+    // 2. Track with X-Tracking-Token header
     const trackRes = await request(app)
       .get(`/api/orders/track/${orderNumber}`)
-      .query({ token: trackingToken });
+      .set('X-Tracking-Token', trackingToken);
 
     expect(trackRes.status).toBe(200);
     expect(trackRes.body.success).toBe(true);
@@ -70,6 +79,31 @@ describe('Issue 1: Secure Customer Order Tracking & Authorization', () => {
     expect(data.estimatedDelivery).toBeDefined();
     expect(data.items.length).toBe(1);
     expect(data.items[0].productName).toBeDefined();
+  });
+
+  it('Security Enforcement: should strictly REJECT tracking tokens passed via URL query parameters', async () => {
+    const checkoutRes = await request(app)
+      .post('/api/orders')
+      .send({
+        customerName: 'أحمد حلمي',
+        phone: '01099887766',
+        email: 'helmy@example.com',
+        address: 'مدينة نصر',
+        city: 'القاهرة',
+        items: [{ productId: 'opt-001', quantity: 1 }],
+      });
+
+    const orderNumber = checkoutRes.body.data.orderNumber;
+    const trackingToken = checkoutRes.body.trackingToken;
+
+    // Attempt tracking with query param ?token=...
+    const rejectedRes = await request(app)
+      .get(`/api/orders/track/${orderNumber}`)
+      .query({ token: trackingToken });
+
+    expect(rejectedRes.status).toBe(400);
+    expect(rejectedRes.body.success).toBe(false);
+    expect(rejectedRes.body.message).toMatch(/معلمات الرابط|X-Tracking-Token/i);
   });
 
   it('CUSTOMER PRIVACY: should NEVER expose full address, phone, email, internal IDs or tracking hash', async () => {
@@ -89,7 +123,7 @@ describe('Issue 1: Secure Customer Order Tracking & Authorization', () => {
 
     const trackRes = await request(app)
       .get(`/api/orders/track/${orderNumber}`)
-      .query({ token: trackingToken });
+      .set('X-Tracking-Token', trackingToken);
 
     expect(trackRes.status).toBe(200);
     const data = trackRes.body.data;
@@ -111,15 +145,15 @@ describe('Issue 1: Secure Customer Order Tracking & Authorization', () => {
   });
 
   it('should reject tracking requests when guessing an order number without a valid token', async () => {
-    // Attempt tracking without token
+    // Attempt tracking without token header
     const resNoToken = await request(app).get('/api/orders/track/OPT-2026-00001');
     expect(resNoToken.status).toBe(400);
 
-    // Attempt tracking with random guessed token
+    // Attempt tracking with random guessed token in header
     const fakeToken = crypto.randomBytes(32).toString('hex');
     const resFakeToken = await request(app)
       .get('/api/orders/track/OPT-2026-00001')
-      .query({ token: fakeToken });
+      .set('X-Tracking-Token', fakeToken);
 
     expect(resFakeToken.status).toBe(404);
   });
@@ -152,10 +186,10 @@ describe('Issue 1: Secure Customer Order Tracking & Authorization', () => {
     const tokenA = orderARes.body.trackingToken;
     const orderNumberB = orderBRes.body.data.orderNumber;
 
-    // Use Token A to access Order B
+    // Use Token A to access Order B via header
     const crossAccessRes = await request(app)
       .get(`/api/orders/track/${orderNumberB}`)
-      .query({ token: tokenA });
+      .set('X-Tracking-Token', tokenA);
 
     expect(crossAccessRes.status).toBe(401);
     expect(crossAccessRes.body.success).toBe(false);
@@ -173,10 +207,10 @@ describe('Issue 1: Secure Customer Order Tracking & Authorization', () => {
         items: [{ productId: 'opt-001', quantity: 1 }],
       });
 
-    const orderId = checkoutRes.body.data.id;
+    const orderNumber = checkoutRes.body.data.orderNumber;
 
     // Direct public access to complete order record without admin JWT must be 401
-    const publicAccessRes = await request(app).get(`/api/orders/${orderId}`);
+    const publicAccessRes = await request(app).get(`/api/orders/${orderNumber}`);
     expect(publicAccessRes.status).toBe(401);
     expect(publicAccessRes.body.success).toBe(false);
   });

@@ -1,4 +1,4 @@
-import { HttpClient, HttpParams } from '@angular/common/http';
+import { HttpClient, HttpHeaders, HttpParams } from '@angular/common/http';
 import { Injectable, inject } from '@angular/core';
 import { Observable } from 'rxjs';
 import { environment } from '../../../environments/environment';
@@ -24,16 +24,16 @@ export interface CreateOrderPayload {
 }
 
 export interface OrderItemData {
-  id: string;
-  orderId: string;
-  productId: string;
+  id?: string;
+  orderId?: string;
+  productId?: string;
   productName: string;
-  productImage: string;
+  productImage?: string;
   unitPrice: number;
   quantity: number;
   total: number;
-  selectedColor?: string;
-  lensOption?: string;
+  selectedColor?: string | null;
+  lensOption?: string | null;
 }
 
 export interface OrderData {
@@ -53,6 +53,8 @@ export interface OrderData {
   paymentStatus: 'UNPAID' | 'PAID';
   orderStatus: 'PENDING' | 'CONFIRMED' | 'PROCESSING' | 'SHIPPED' | 'DELIVERED' | 'CANCELLED';
   notes?: string | null;
+  paidAt?: string | null;
+  paidBy?: string | null;
   createdAt: string;
   updatedAt: string;
   cancelledAt?: string | null;
@@ -67,11 +69,31 @@ export interface OrdersListResponse {
   data: OrderData[];
 }
 
+export interface CreatedOrderConfirmationData {
+  orderNumber: string;
+  orderStatus: string;
+  paymentMethod: string;
+  paymentStatus: string;
+  subtotal: number;
+  discount: number;
+  shipping: number;
+  total: number;
+  createdAt: string;
+  items: OrderItemData[];
+}
+
+export interface CreateOrderResponse {
+  success: boolean;
+  message?: string;
+  data: CreatedOrderConfirmationData;
+  trackingToken?: string;
+}
+
 export interface SingleOrderResponse {
   success: boolean;
   message?: string;
+  alreadyPaid?: boolean;
   data: OrderData;
-  trackingToken?: string;
 }
 
 export interface TrackingDataResponse {
@@ -107,19 +129,40 @@ export class OrderApiService {
   private http = inject(HttpClient);
   private baseUrl = `${environment.apiUrl}/orders`;
 
-  createOrder(payload: CreateOrderPayload): Observable<SingleOrderResponse> {
-    return this.http.post<SingleOrderResponse>(this.baseUrl, payload);
+  /**
+   * Submits a new customer checkout order.
+   * Sends idempotency key via standard HTTP header.
+   */
+  createOrder(payload: CreateOrderPayload): Observable<CreateOrderResponse> {
+    let headers = new HttpHeaders();
+    if (payload.idempotencyKey) {
+      headers = headers.set('Idempotency-Key', payload.idempotencyKey);
+    }
+    return this.http.post<CreateOrderResponse>(this.baseUrl, payload, { headers });
   }
 
+  /**
+   * Securely queries order tracking information.
+   * STRICTLY transmits tracking token via X-Tracking-Token header (no tokens in URL query params).
+   */
   trackOrder(orderNumber: string, token: string): Observable<TrackingDataResponse> {
-    const params = new HttpParams().set('token', token);
-    return this.http.get<TrackingDataResponse>(`${this.baseUrl}/track/${orderNumber}`, { params });
+    const headers = new HttpHeaders().set('X-Tracking-Token', token.trim());
+    return this.http.get<TrackingDataResponse>(
+      `${this.baseUrl}/track/${encodeURIComponent(orderNumber.trim())}`,
+      { headers }
+    );
   }
 
+  /**
+   * Admin-Only: Retrieve complete order by ID or orderNumber.
+   */
   getOrderById(idOrNumber: string): Observable<SingleOrderResponse> {
-    return this.http.get<SingleOrderResponse>(`${this.baseUrl}/${idOrNumber}`);
+    return this.http.get<SingleOrderResponse>(`${this.baseUrl}/${encodeURIComponent(idOrNumber)}`);
   }
 
+  /**
+   * Admin-Only: Retrieve all orders with optional search and filters.
+   */
   getAllOrders(filters?: {
     search?: string;
     orderStatus?: string;
@@ -140,10 +183,21 @@ export class OrderApiService {
     return this.http.get<OrdersListResponse>(this.baseUrl, { params });
   }
 
+  /**
+   * Admin-Only: Updates order status and payment status.
+   */
   updateOrderStatus(
     orderId: string,
     update: { orderStatus: string; paymentStatus?: string; notes?: string; cancellationReason?: string }
   ): Observable<SingleOrderResponse> {
     return this.http.patch<SingleOrderResponse>(`${this.baseUrl}/${orderId}/status`, update);
+  }
+
+  /**
+   * Admin-Only: Dedicated Cash Collection Action for Cash on Delivery (COD) orders.
+   * Transactional and idempotent.
+   */
+  collectCash(orderId: string): Observable<SingleOrderResponse> {
+    return this.http.post<SingleOrderResponse>(`${this.baseUrl}/${orderId}/collect-cash`, {});
   }
 }
