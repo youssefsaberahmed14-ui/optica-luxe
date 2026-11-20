@@ -154,6 +154,18 @@ export class OrderService {
       throw { statusCode: 400, message: 'سلة المشتريات فارغة.' };
     }
 
+    // Strict validation of mandatory idempotencyKey
+    if (
+      !input.idempotencyKey ||
+      typeof input.idempotencyKey !== 'string' ||
+      input.idempotencyKey.trim().length < 16
+    ) {
+      throw {
+        statusCode: 400,
+        message: 'مفتاح عدم التكرار (Idempotency Key) مطلوب لتأكيد الطلب ويجب ألا يقل عن 16 حرفاً.',
+      };
+    }
+
     // 1. Idempotency Check: Prevent duplicate orders if client retries with same idempotency key
     if (input.idempotencyKey) {
       const existing = isPostgresConnected
@@ -626,6 +638,14 @@ export class OrderService {
           throw { statusCode: 404, message: 'الطلب غير موجود.' };
         }
 
+        // Only COD orders are eligible for cash collection
+        if (order.paymentMethod !== 'COD') {
+          throw {
+            statusCode: 400,
+            message: 'تحصيل النقدية متاح حصراً لطلبات الدفع عند الاستلام (COD).',
+          };
+        }
+
         // Prevent cash collection on cancelled orders
         if (order.orderStatus === 'CANCELLED') {
           throw { statusCode: 400, message: 'لا يمكن تحصيل نقدية لطلب ملغي.' };
@@ -639,49 +659,81 @@ export class OrderService {
           };
         }
 
-        // Idempotent check: if already collected, return existing state
-        if (order.paymentStatus === 'PAID') {
-          return {
-            order,
-            alreadyPaid: true,
-            message: `تم تحصيل النقدية لهذا الطلب مسبقاً بواسطة ${order.paidBy || 'المسؤول'}.`,
-          };
-        }
-
         const paidAt = new Date();
-        const updated = await tx.order.update({
-          where: { id: order.id },
+
+        // ATOMIC CONDITIONAL UPDATE:
+        // Guarantees that only ONE concurrent transaction transitions UNPAID to PAID.
+        const updateResult = await tx.order.updateMany({
+          where: {
+            id: order.id,
+            orderStatus: 'DELIVERED',
+            paymentMethod: 'COD',
+            paymentStatus: 'UNPAID',
+          },
           data: {
             paymentStatus: 'PAID',
             paidAt,
             paidBy: actorIdentifier,
           },
-          include: { items: true },
         });
 
-        // Audit Trail
-        await tx.orderStatusHistory.create({
-          data: {
-            orderId: order.id,
-            fromStatus: order.orderStatus,
-            toStatus: order.orderStatus,
-            changedBy: actorIdentifier,
-            notes: `Cash on Delivery (COD) payment collected and confirmed by ${actorIdentifier}.`,
-          },
-        });
+        if (updateResult.count === 1) {
+          // Exactly ONE transaction successfully collected cash.
+          // Create audit trail ONLY for this successful transition.
+          await tx.orderStatusHistory.create({
+            data: {
+              orderId: order.id,
+              fromStatus: order.orderStatus,
+              toStatus: order.orderStatus,
+              changedBy: actorIdentifier,
+              notes: `Cash on Delivery (COD) payment collected and confirmed by ${actorIdentifier}.`,
+            },
+          });
 
-        return {
-          order: updated,
-          alreadyPaid: false,
-          message: 'تم تأكيد تحصيل النقدية بنجاح وتسجيل العملية في سجل التدقيق.',
-        };
+          const updated = await tx.order.findUnique({
+            where: { id: order.id },
+            include: { items: true, statusHistory: true },
+          });
+
+          return {
+            order: updated,
+            alreadyPaid: false,
+            message: 'تم تأكيد تحصيل النقدية بنجاح وتسجيل العملية في سجل التدقيق.',
+          };
+        } else {
+          // updateResult.count === 0: Another concurrent transaction already succeeded
+          const currentOrder = await tx.order.findUnique({
+            where: { id: order.id },
+            include: { items: true, statusHistory: true },
+          });
+
+          if (currentOrder && currentOrder.paymentStatus === 'PAID') {
+            return {
+              order: currentOrder,
+              alreadyPaid: true,
+              message: `تم تحصيل النقدية لهذا الطلب مسبقاً بواسطة ${currentOrder.paidBy || 'المسؤول'}.`,
+            };
+          }
+
+          throw {
+            statusCode: 400,
+            message: 'تعذر تحصيل النقدية: حالة الطلب الحالية غير مؤهلة للتحصيل.',
+          };
+        }
       });
     } else {
-      // Test Harness
+      // Test Harness (Atomic simulation)
       const order = isolatedTestDb.orders.find(
         (o) => o.id === idOrNumber || o.orderNumber === idOrNumber
       );
       if (!order) throw { statusCode: 404, message: 'الطلب غير موجود.' };
+
+      if (order.paymentMethod !== 'COD') {
+        throw {
+          statusCode: 400,
+          message: 'تحصيل النقدية متاح حصراً لطلبات الدفع عند الاستلام (COD).',
+        };
+      }
 
       if (order.orderStatus === 'CANCELLED') {
         throw { statusCode: 400, message: 'لا يمكن تحصيل نقدية لطلب ملغي.' };
@@ -694,6 +746,7 @@ export class OrderService {
         };
       }
 
+      // Check if already collected
       if (order.paymentStatus === 'PAID') {
         return {
           order,
@@ -706,6 +759,16 @@ export class OrderService {
       order.paidAt = new Date();
       order.paidBy = actorIdentifier;
       order.updatedAt = new Date();
+
+      isolatedTestDb.statusHistory.push({
+        id: 'hist-' + Math.random().toString(36).substring(2, 8),
+        orderId: order.id,
+        fromStatus: order.orderStatus,
+        toStatus: order.orderStatus,
+        changedBy: actorIdentifier,
+        notes: `Cash on Delivery (COD) payment collected and confirmed by ${actorIdentifier}.`,
+        createdAt: new Date(),
+      });
 
       return {
         order,
@@ -751,7 +814,7 @@ export class OrderService {
         }
 
         // 3. Payment Status Rules (COD):
-        // Cash collection (PAID) is ONLY allowed when order is DELIVERED
+        // Generic status update MUST NOT bypass dedicated cash collection
         let resolvedPaymentStatus = order.paymentStatus;
         let paidAt = order.paidAt;
         let paidBy = order.paidBy;
@@ -759,16 +822,11 @@ export class OrderService {
         if (update.paymentStatus) {
           const targetPayment = update.paymentStatus.toUpperCase();
           if (targetPayment === 'PAID') {
-            if (targetStatus !== 'DELIVERED' && currentStatus !== 'DELIVERED') {
-              throw {
-                statusCode: 400,
-                message: 'لا يمكن تعيين حالة الدفع "مدفوع (PAID)" لطلبات الدفع عند الاستلام (COD) إلا بعد تسليم الطلب للعميل فعلياً (DELIVERED).',
-              };
-            }
-            if (order.paymentStatus !== 'PAID') {
-              paidAt = new Date();
-              paidBy = actorIdentifier;
-            }
+            throw {
+              statusCode: 400,
+              message:
+                'لا يمكن تعيين حالة الدفع مباشرة إلى مدفوع (PAID) عبر مسار تعديل الحالة العام. يجب تسجيل تحصيل النقدية حصراً عبر الإجراء المخصص (POST /api/orders/:id/collect-cash).',
+            };
           }
           resolvedPaymentStatus = targetPayment;
         }
@@ -877,16 +935,11 @@ export class OrderService {
       }
 
       if (update.paymentStatus && update.paymentStatus.toUpperCase() === 'PAID') {
-        if (targetStatus !== 'DELIVERED' && currentStatus !== 'DELIVERED') {
-          throw {
-            statusCode: 400,
-            message: 'لا يمكن تعيين حالة الدفع "مدفوع (PAID)" لطلبات الدفع عند الاستلام (COD) إلا بعد تسليم الطلب للعميل فعلياً (DELIVERED).',
-          };
-        }
-        if (order.paymentStatus !== 'PAID') {
-          order.paidAt = new Date();
-          order.paidBy = actorIdentifier;
-        }
+        throw {
+          statusCode: 400,
+          message:
+            'لا يمكن تعيين حالة الدفع مباشرة إلى مدفوع (PAID) عبر مسار تعديل الحالة العام. يجب تسجيل تحصيل النقدية حصراً عبر الإجراء المخصص (POST /api/orders/:id/collect-cash).',
+        };
       }
 
       if (targetStatus === 'CANCELLED' && currentStatus !== 'CANCELLED') {

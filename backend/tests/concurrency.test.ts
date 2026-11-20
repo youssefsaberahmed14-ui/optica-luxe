@@ -1,9 +1,9 @@
+import jsonwebtoken from 'jsonwebtoken';
 import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { env } from '../src/config/env';
 import { isolatedTestDb, seedIsolatedTestData } from '../src/database/prisma';
-import jsonwebtoken from 'jsonwebtoken';
 
 const app = createApp();
 
@@ -20,7 +20,7 @@ function getAdminToken(): string {
   );
 }
 
-describe('Issue 3 & 4: Concurrency Tests (Scenarios A & B)', () => {
+describe('Issues 1, 3 & 4: Concurrency & Mandatory Idempotency Tests', () => {
   let adminToken: string;
 
   beforeEach(async () => {
@@ -32,7 +32,7 @@ describe('Issue 3 & 4: Concurrency Tests (Scenarios A & B)', () => {
     const limitedProduct = isolatedTestDb.products.find((p) => p.id === 'opt-last-item')!;
     expect(limitedProduct.stock).toBe(1); // Starting stock is strictly 1
 
-    // Simulate Customer A and Customer B sending orders simultaneously
+    // Simulate Customer A and Customer B sending orders simultaneously with unique mandatory idempotency keys
     const customerA = request(app)
       .post('/api/orders')
       .send({
@@ -42,6 +42,7 @@ describe('Issue 3 & 4: Concurrency Tests (Scenarios A & B)', () => {
         address: 'عنوان أ',
         city: 'القاهرة',
         items: [{ productId: 'opt-last-item', quantity: 1 }],
+        idempotencyKey: 'idemp_concurrent_cust_a_key_1',
       });
 
     const customerB = request(app)
@@ -53,6 +54,7 @@ describe('Issue 3 & 4: Concurrency Tests (Scenarios A & B)', () => {
         address: 'عنوان ب',
         city: 'الجيزة',
         items: [{ productId: 'opt-last-item', quantity: 1 }],
+        idempotencyKey: 'idemp_concurrent_cust_b_key_2',
       });
 
     // Execute concurrently
@@ -85,6 +87,7 @@ describe('Issue 3 & 4: Concurrency Tests (Scenarios A & B)', () => {
         address: 'الرحاب',
         city: 'القاهرة',
         items: [{ productId: 'opt-003', quantity: 2 }],
+        idempotencyKey: 'idemp_cancel_test_key_123456',
       });
 
     const orderId = checkoutRes.body.data.orderNumber;
@@ -110,6 +113,71 @@ describe('Issue 3 & 4: Concurrency Tests (Scenarios A & B)', () => {
     // At least one returned success
     const cancelStatuses = [cancelRes1.status, cancelRes2.status];
     expect(cancelStatuses.includes(200)).toBe(true);
+  });
+
+  it('Scenario C: Concurrent Cash Collection requests -> exactly ONE payment transition and audit record', async () => {
+    // 1. Create order
+    const checkoutRes = await request(app)
+      .post('/api/orders')
+      .send({
+        customerName: 'محمود الجندي',
+        phone: '01012345678',
+        email: 'elgendy@example.com',
+        address: 'مدينة نصر',
+        city: 'القاهرة',
+        items: [{ productId: 'opt-001', quantity: 1 }],
+        idempotencyKey: 'idemp_cash_collect_concurrent_1',
+      });
+
+    const orderNumber = checkoutRes.body.data.orderNumber;
+
+    // 2. Deliver order
+    await request(app)
+      .patch(`/api/orders/${orderNumber}/status`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ orderStatus: 'CONFIRMED' });
+    await request(app)
+      .patch(`/api/orders/${orderNumber}/status`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ orderStatus: 'PROCESSING' });
+    await request(app)
+      .patch(`/api/orders/${orderNumber}/status`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ orderStatus: 'SHIPPED' });
+    await request(app)
+      .patch(`/api/orders/${orderNumber}/status`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ orderStatus: 'DELIVERED' });
+
+    // 3. Fire two simultaneous cash collection requests from two admins
+    const collectReq1 = request(app)
+      .post(`/api/orders/${orderNumber}/collect-cash`)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    const collectReq2 = request(app)
+      .post(`/api/orders/${orderNumber}/collect-cash`)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    const [res1, res2] = await Promise.all([collectReq1, collectReq2]);
+
+    expect(res1.status).toBe(200);
+    expect(res2.status).toBe(200);
+
+    // Exactly one marks payment transition (alreadyPaid === false)
+    const transitions = [res1.body.alreadyPaid, res2.body.alreadyPaid];
+    expect(transitions.filter((t) => t === false).length).toBe(1);
+    expect(transitions.filter((t) => t === true).length).toBe(1);
+
+    // Verify order is PAID
+    const orderInDb = isolatedTestDb.orders.find((o) => o.orderNumber === orderNumber);
+    expect(orderInDb!.paymentStatus).toBe('PAID');
+    expect(orderInDb!.paidAt).toBeDefined();
+
+    // Verify exactly 1 cash collection history record created for this order
+    const cashAuditRecords = isolatedTestDb.statusHistory.filter(
+      (h) => h.orderId === orderInDb!.id && h.notes?.includes('Cash on Delivery')
+    );
+    expect(cashAuditRecords.length).toBe(1);
   });
 
   it('Idempotency mechanism: Repeated checkout submission with same idempotency key prevents duplicate orders', async () => {

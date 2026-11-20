@@ -18,12 +18,15 @@ export const createOrderSchema = z.object({
   paymentMethod: z
     .string()
     .optional()
-    .transform((val) => {
-      // Optica Luxe enforces Cash on Delivery (COD) only
-      return 'COD';
-    }),
+    .transform(() => 'COD'),
   notes: z.string().optional().nullable(),
-  idempotencyKey: z.string().optional().nullable(),
+  idempotencyKey: z
+    .string({
+      required_error: 'مفتاح عدم التكرار (Idempotency Key) مطلوب لتأكيد الطلب.',
+      invalid_type_error: 'مفتاح عدم التكرار (Idempotency Key) يجب أن يكون نصاً صالحاً.',
+    })
+    .min(16, 'مفتاح عدم التكرار (Idempotency Key) غير صالح (يجب ألا يقل عن 16 حرفاً).')
+    .max(128, 'مفتاح عدم التكرار (Idempotency Key) يتجاوز الحد المسموح به (128 حرفاً).'),
 });
 
 const normalizeOrderStatus = (val: unknown) => {
@@ -46,8 +49,12 @@ export const updateOrderStatusSchema = z.object({
     z.enum(['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'])
   ),
   paymentStatus: z
-    .preprocess(normalizePaymentStatus, z.enum(['UNPAID', 'PAID']))
-    .optional(),
+    .preprocess(normalizePaymentStatus, z.string())
+    .optional()
+    .refine((val) => !val || val.toUpperCase() !== 'PAID', {
+      message:
+        'لا يمكن تحويل حالة الدفع إلى مدفوع (PAID) عبر مسار تعديل الحالة العام. يجب تحصيل النقدية حصراً عبر الإجراء المخصص (POST /api/orders/:id/collect-cash).',
+    }),
   notes: z.string().optional(),
   cancellationReason: z.string().optional(),
 });

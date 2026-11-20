@@ -5,44 +5,40 @@ import { env } from '../src/config/env';
 const prisma = new PrismaClient();
 
 async function main() {
-  console.log('🌱 Starting Optica Luxe database seed...');
-
-  // 1. Seed Admin User
-  let adminEmail: string | undefined = env.adminEmail;
-  let adminPassword: string | undefined = env.adminPassword;
-
-  if (env.isProduction) {
-    if (!adminEmail || !adminPassword) {
-      console.warn('⚠️ [Seed] In production, ADMIN_EMAIL and ADMIN_PASSWORD must be explicitly provided in environment.');
-    }
-  } else {
-    // Development fallback
-    adminEmail = adminEmail || 'admin@optica-luxe.com';
-    adminPassword = adminPassword || 'Admin@Dev2026!';
+  // CRITICAL SAFETY GUARD: Prevent accidental demo seeding in production!
+  if (process.env.NODE_ENV === 'production' || env.isProduction) {
+    console.error('\n🛑 [CRITICAL SAFETY GUARD] Demo database seeding is strictly FORBIDDEN in production mode!');
+    console.error('🛑 Running seed in production could overwrite real inventory, pricing, and live customer data.');
+    console.error('🛡️ To provision a production administrator safely, use: npm run bootstrap:admin\n');
+    throw new Error('[Safety Guard] Demo seed execution is strictly BLOCKED in production environment.');
   }
 
-  if (adminEmail && adminPassword) {
-    const passwordHash = await bcrypt.hash(adminPassword, 12);
+  console.log('🌱 Starting Optica Luxe database seed (Development Mode Only)...');
 
-    const admin = await prisma.adminUser.upsert({
-      where: { email: adminEmail.toLowerCase() },
-      update: {
-        name: env.adminName || 'Optica Luxe Administrator',
-        passwordHash,
-        role: 'SUPERADMIN',
-      },
-      create: {
-        name: env.adminName || 'Optica Luxe Administrator',
-        email: adminEmail.toLowerCase(),
-        passwordHash,
-        role: 'SUPERADMIN',
-      },
-    });
+  // 1. Seed Development Admin User
+  const adminEmail = (env.adminEmail || 'admin@optica-luxe.com').toLowerCase();
+  const adminPassword = env.adminPassword || 'Admin@Dev2026!';
 
-    console.log(`✅ Seeded admin user: ${admin.email}`);
-  }
+  const passwordHash = await bcrypt.hash(adminPassword, 12);
 
-  // 2. Seed Coupons (using Decimal values)
+  const admin = await prisma.adminUser.upsert({
+    where: { email: adminEmail },
+    update: {
+      name: env.adminName || 'Optica Luxe Administrator',
+      passwordHash,
+      role: 'SUPERADMIN',
+    },
+    create: {
+      name: env.adminName || 'Optica Luxe Administrator',
+      email: adminEmail,
+      passwordHash,
+      role: 'SUPERADMIN',
+    },
+  });
+
+  console.log(`✅ Seeded development admin user: ${admin.email}`);
+
+  // 2. Seed Development Coupons
   const coupons = [
     {
       code: 'LUXE2026',
@@ -76,7 +72,7 @@ async function main() {
   }
   console.log(`✅ Seeded ${coupons.length} promotional coupons.`);
 
-  // 3. Seed Products
+  // 3. Seed Development Products
   const products = [
     {
       sku: 'CRT-PNT-GLD-01',
@@ -299,12 +295,12 @@ async function main() {
   }
 
   console.log(`✅ Seeded ${products.length} luxury optical products.`);
-  console.log('✨ Database seed completed successfully!');
+  console.log('✨ Development database seed completed successfully!');
 }
 
 main()
   .catch((e) => {
-    console.error('❌ Database seed error:', e);
+    console.error('❌ Database seed error:', e.message || e);
     process.exit(1);
   })
   .finally(async () => {

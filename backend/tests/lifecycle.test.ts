@@ -20,7 +20,7 @@ function getAdminToken(): string {
   );
 }
 
-describe('Issues 4 & 5 & 8: Order State Machine, Cancellation, COD Rules & Dedicated Cash Collection', () => {
+describe('Issues 1, 2, 4 & 8: Order State Machine, Cancellation, COD Rules & Dedicated Cash Collection', () => {
   let adminToken: string;
 
   beforeEach(async () => {
@@ -38,6 +38,7 @@ describe('Issues 4 & 5 & 8: Order State Machine, Cancellation, COD Rules & Dedic
         address: 'شارع الهرم، الجيزة',
         city: 'الجيزة',
         items: [{ productId: 'opt-001', quantity: 1 }],
+        idempotencyKey: 'idemp_lifecycle_order_01_key',
       });
 
     expect(res.status).toBe(201);
@@ -46,7 +47,7 @@ describe('Issues 4 & 5 & 8: Order State Machine, Cancellation, COD Rules & Dedic
     expect(res.body.data.orderStatus).toBe('PENDING');
   });
 
-  it('should REJECT marking payment as PAID while order is PENDING, CONFIRMED, PROCESSING, or SHIPPED', async () => {
+  it('Issue 2: Generic status endpoint MUST REJECT setting paymentStatus: PAID with HTTP 400 at any stage', async () => {
     // 1. Create order
     const checkoutRes = await request(app)
       .post('/api/orders')
@@ -57,11 +58,12 @@ describe('Issues 4 & 5 & 8: Order State Machine, Cancellation, COD Rules & Dedic
         address: 'شارع الهرم',
         city: 'الجيزة',
         items: [{ productId: 'opt-002', quantity: 1 }],
+        idempotencyKey: 'idemp_lifecycle_order_02_key',
       });
 
     const orderNumber = checkoutRes.body.data.orderNumber;
 
-    // 2. Try to mark as PAID while PENDING -> MUST FAIL
+    // 2. Try to mark as PAID while PENDING via generic PATCH -> MUST FAIL (400)
     const patchPendingPaid = await request(app)
       .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
@@ -71,25 +73,14 @@ describe('Issues 4 & 5 & 8: Order State Machine, Cancellation, COD Rules & Dedic
       });
 
     expect(patchPendingPaid.status).toBe(400);
-    expect(patchPendingPaid.body.message).toContain('لا يمكن تعيين حالة الدفع');
+    expect(JSON.stringify(patchPendingPaid.body)).toMatch(/(لا يمكن تعيين حالة الدفع مباشرة|حصراً عبر الإجراء المخصص|لا يمكن تحويل حالة الدفع إلى مدفوع)/);
 
-    // 3. Confirm order, then try to mark PAID -> MUST FAIL
+    // 3. Move to DELIVERED, then try to mark PAID via generic PATCH -> MUST STILL FAIL (400)
     await request(app)
       .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ orderStatus: 'CONFIRMED' });
 
-    const patchConfirmedPaid = await request(app)
-      .patch(`/api/orders/${orderNumber}/status`)
-      .set('Authorization', `Bearer ${adminToken}`)
-      .send({
-        orderStatus: 'CONFIRMED',
-        paymentStatus: 'PAID',
-      });
-
-    expect(patchConfirmedPaid.status).toBe(400);
-
-    // 4. Ship order, then try to mark PAID before delivery -> MUST FAIL
     await request(app)
       .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
@@ -100,15 +91,22 @@ describe('Issues 4 & 5 & 8: Order State Machine, Cancellation, COD Rules & Dedic
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ orderStatus: 'SHIPPED' });
 
-    const patchShippedPaid = await request(app)
+    await request(app)
+      .patch(`/api/orders/${orderNumber}/status`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ orderStatus: 'DELIVERED' });
+
+    // Even when DELIVERED, generic endpoint MUST REJECT setting PAID!
+    const patchDeliveredPaid = await request(app)
       .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send({
-        orderStatus: 'SHIPPED',
+        orderStatus: 'DELIVERED',
         paymentStatus: 'PAID',
       });
 
-    expect(patchShippedPaid.status).toBe(400);
+    expect(patchDeliveredPaid.status).toBe(400);
+    expect(JSON.stringify(patchDeliveredPaid.body)).toMatch(/(لا يمكن تعيين حالة الدفع مباشرة|حصراً عبر الإجراء المخصص|لا يمكن تحويل حالة الدفع إلى مدفوع)/);
   });
 
   it('Dedicated Cash Collection (POST /api/orders/:id/collect-cash): should enforce DELIVERED status, record paidAt/paidBy, and be idempotent', async () => {
@@ -122,6 +120,7 @@ describe('Issues 4 & 5 & 8: Order State Machine, Cancellation, COD Rules & Dedic
         address: 'الزمالك',
         city: 'القاهرة',
         items: [{ productId: 'opt-001', quantity: 1 }],
+        idempotencyKey: 'idemp_lifecycle_order_03_key',
       });
 
     const orderNumber = checkoutRes.body.data.orderNumber;
@@ -155,7 +154,7 @@ describe('Issues 4 & 5 & 8: Order State Machine, Cancellation, COD Rules & Dedic
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ orderStatus: 'DELIVERED' });
 
-    // 5. Successful Cash Collection
+    // 5. Successful Cash Collection exclusively through dedicated endpoint
     const collectRes = await request(app)
       .post(`/api/orders/${orderNumber}/collect-cash`)
       .set('Authorization', `Bearer ${adminToken}`);
@@ -190,6 +189,7 @@ describe('Issues 4 & 5 & 8: Order State Machine, Cancellation, COD Rules & Dedic
         address: 'جاردن سيتي',
         city: 'القاهرة',
         items: [{ productId: 'opt-003', quantity: 2 }],
+        idempotencyKey: 'idemp_lifecycle_order_04_key',
       });
 
     const orderNumber = checkoutRes.body.data.orderNumber;
@@ -225,6 +225,7 @@ describe('Issues 4 & 5 & 8: Order State Machine, Cancellation, COD Rules & Dedic
         address: 'الشيخ زايد',
         city: 'الجيزة',
         items: [{ productId: 'opt-001', quantity: 1 }],
+        idempotencyKey: 'idemp_lifecycle_order_05_key',
       });
 
     const orderNumber = checkoutRes.body.data.orderNumber;
@@ -248,7 +249,7 @@ describe('Issues 4 & 5 & 8: Order State Machine, Cancellation, COD Rules & Dedic
     expect(prod.stock).toBe(initialStock);
   });
 
-  it('DELIVERED orders cannot be cancelled', async () => {
+  it('DELIVERED orders cannot be cancelled and CANCELLED orders cannot be collected for cash', async () => {
     const checkoutRes = await request(app)
       .post('/api/orders')
       .send({
@@ -258,6 +259,7 @@ describe('Issues 4 & 5 & 8: Order State Machine, Cancellation, COD Rules & Dedic
         address: 'المهندسين',
         city: 'الجيزة',
         items: [{ productId: 'opt-002', quantity: 1 }],
+        idempotencyKey: 'idemp_lifecycle_order_06_key',
       });
 
     const orderNumber = checkoutRes.body.data.orderNumber;
@@ -278,7 +280,7 @@ describe('Issues 4 & 5 & 8: Order State Machine, Cancellation, COD Rules & Dedic
     await request(app)
       .patch(`/api/orders/${orderNumber}/status`)
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ orderStatus: 'DELIVERED', paymentStatus: 'PAID' });
+      .send({ orderStatus: 'DELIVERED' });
 
     // Attempt to cancel DELIVERED order -> MUST BE REJECTED
     const cancelAttempt = await request(app)

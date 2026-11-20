@@ -213,10 +213,12 @@ import { IconComponent } from '../../../shared/components/icon/icon.component';
 
               <div class="form-group">
                 <label class="form-label">حالة التحصيل (COD):</label>
-                <select [(ngModel)]="editPaymentStatus" class="form-select">
-                  <option value="UNPAID">غير مدفوع (UNPAID - بانتظار التسليم)</option>
-                  <option value="PAID">تم التحصيل نقداً (PAID - تم التسليم)</option>
-                </select>
+                <div class="payment-status-display" style="padding: 0.6rem 0.85rem; background: #fdfcf9; border: 1px solid #e5dfd3; border-radius: 6px; display: flex; align-items: center; justify-content: space-between;">
+                  <span class="badge" [ngClass]="getPaymentStatusClass(order()!.paymentStatus)">
+                    {{ formatPaymentStatus(order()!.paymentStatus) }}
+                  </span>
+                  <span style="font-size: 0.75rem; color: #777;">(يتم التحصيل حصراً عبر زر تأكيد التحصيل)</span>
+                </div>
               </div>
 
               <div class="form-group">
@@ -727,7 +729,6 @@ export class AdminOrderDetailComponent implements OnInit {
     this.orderApiService
       .updateOrderStatus(orderData.id, {
         orderStatus: this.editOrderStatus,
-        paymentStatus: this.editPaymentStatus,
         notes: this.editNotes,
       })
       .subscribe({

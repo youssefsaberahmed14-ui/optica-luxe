@@ -50,6 +50,7 @@ describe('Issue 5: Monetary Decimal Arithmetic & Precision Verification', () => 
         address: 'الدقي',
         city: 'الجيزة',
         items: [{ productId: 'opt-decimal-test', quantity: 3 }],
+        idempotencyKey: 'idemp_monetary_decimal_key_01',
       });
 
     expect(res.status).toBe(201);
@@ -94,6 +95,7 @@ describe('Issue 5: Monetary Decimal Arithmetic & Precision Verification', () => 
         city: 'القاهرة',
         items: [{ productId: 'opt-coupon-decimal', quantity: 1 }],
         couponCode: 'LUXE2026', // 15%
+        idempotencyKey: 'idemp_monetary_decimal_key_02',
       });
 
     expect(res.status).toBe(201);

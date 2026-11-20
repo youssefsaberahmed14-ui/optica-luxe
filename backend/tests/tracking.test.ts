@@ -6,7 +6,7 @@ import { seedIsolatedTestData } from '../src/database/prisma';
 
 const app = createApp();
 
-describe('Issue 1 & 3: Secure Customer Order Tracking, Sanitized DTO & Header-Based Auth', () => {
+describe('Issue 4: Strict Header-Only Customer Order Tracking & Authorization', () => {
   beforeEach(async () => {
     await seedIsolatedTestData();
   });
@@ -21,6 +21,7 @@ describe('Issue 1 & 3: Secure Customer Order Tracking, Sanitized DTO & Header-Ba
         address: 'شارع الثورة، مصر الجديدة، شقة 12',
         city: 'القاهرة',
         items: [{ productId: 'opt-001', quantity: 1 }],
+        idempotencyKey: 'idemp_tracking_checkout_01_key',
       });
 
     expect(res.status).toBe(201);
@@ -57,6 +58,7 @@ describe('Issue 1 & 3: Secure Customer Order Tracking, Sanitized DTO & Header-Ba
         address: 'حي الدقي، الجيزة',
         city: 'الجيزة',
         items: [{ productId: 'opt-002', quantity: 1 }],
+        idempotencyKey: 'idemp_tracking_checkout_02_key',
       });
 
     const orderNumber = checkoutRes.body.data.orderNumber;
@@ -81,7 +83,7 @@ describe('Issue 1 & 3: Secure Customer Order Tracking, Sanitized DTO & Header-Ba
     expect(data.items[0].productName).toBeDefined();
   });
 
-  it('Security Enforcement: should strictly REJECT tracking tokens passed via URL query parameters', async () => {
+  it('Security Enforcement: should strictly REJECT tracking tokens passed via URL query parameters (query-only)', async () => {
     const checkoutRes = await request(app)
       .post('/api/orders')
       .send({
@@ -91,6 +93,7 @@ describe('Issue 1 & 3: Secure Customer Order Tracking, Sanitized DTO & Header-Ba
         address: 'مدينة نصر',
         city: 'القاهرة',
         items: [{ productId: 'opt-001', quantity: 1 }],
+        idempotencyKey: 'idemp_tracking_checkout_03_key',
       });
 
     const orderNumber = checkoutRes.body.data.orderNumber;
@@ -103,7 +106,36 @@ describe('Issue 1 & 3: Secure Customer Order Tracking, Sanitized DTO & Header-Ba
 
     expect(rejectedRes.status).toBe(400);
     expect(rejectedRes.body.success).toBe(false);
-    expect(rejectedRes.body.message).toMatch(/معلمات الرابط|X-Tracking-Token/i);
+    expect(rejectedRes.body.message).toMatch(/(معلمات الرابط|X-Tracking-Token)/i);
+  });
+
+  it('Security Enforcement: should strictly REJECT tracking tokens passed via request body (body-only)', async () => {
+    const checkoutRes = await request(app)
+      .post('/api/orders')
+      .send({
+        customerName: 'منى زكي',
+        phone: '01012349999',
+        email: 'mona@example.com',
+        address: 'الزمالك',
+        city: 'القاهرة',
+        items: [{ productId: 'opt-001', quantity: 1 }],
+        idempotencyKey: 'idemp_tracking_checkout_04_key',
+      });
+
+    const orderNumber = checkoutRes.body.data.orderNumber;
+    const trackingToken = checkoutRes.body.trackingToken;
+
+    // Attempt tracking with body { token: ... }
+    const rejectedRes = await request(app)
+      .post('/api/orders/track')
+      .send({
+        orderNumber,
+        token: trackingToken,
+      });
+
+    expect(rejectedRes.status).toBe(400);
+    expect(rejectedRes.body.success).toBe(false);
+    expect(rejectedRes.body.message).toMatch(/(جسم الطلب|Request Body|X-Tracking-Token)/i);
   });
 
   it('CUSTOMER PRIVACY: should NEVER expose full address, phone, email, internal IDs or tracking hash', async () => {
@@ -116,6 +148,7 @@ describe('Issue 1 & 3: Secure Customer Order Tracking, Sanitized DTO & Header-Ba
         address: 'الفيلا 44، كمبوند النرجس، التجمع الخامس، القاهرة الجديدة',
         city: 'القاهرة',
         items: [{ productId: 'opt-001', quantity: 1 }],
+        idempotencyKey: 'idemp_tracking_checkout_05_key',
       });
 
     const orderNumber = checkoutRes.body.data.orderNumber;
@@ -169,6 +202,7 @@ describe('Issue 1 & 3: Secure Customer Order Tracking, Sanitized DTO & Header-Ba
         address: 'شارع أ',
         city: 'القاهرة',
         items: [{ productId: 'opt-001', quantity: 1 }],
+        idempotencyKey: 'idemp_tracking_cross_a_key_1',
       });
 
     // Create Order B
@@ -181,6 +215,7 @@ describe('Issue 1 & 3: Secure Customer Order Tracking, Sanitized DTO & Header-Ba
         address: 'شارع ب',
         city: 'الإسكندرية',
         items: [{ productId: 'opt-002', quantity: 1 }],
+        idempotencyKey: 'idemp_tracking_cross_b_key_2',
       });
 
     const tokenA = orderARes.body.trackingToken;
@@ -205,6 +240,7 @@ describe('Issue 1 & 3: Secure Customer Order Tracking, Sanitized DTO & Header-Ba
         address: 'شارع مصدق، الدقي',
         city: 'الجيزة',
         items: [{ productId: 'opt-001', quantity: 1 }],
+        idempotencyKey: 'idemp_tracking_unauth_key_1',
       });
 
     const orderNumber = checkoutRes.body.data.orderNumber;

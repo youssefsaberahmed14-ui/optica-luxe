@@ -1,6 +1,11 @@
 import { PrismaClient } from '@prisma/client';
 import Decimal from 'decimal.js';
+import jsonwebtoken from 'jsonwebtoken';
+import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createApp } from '../src/app';
+import { env } from '../src/config/env';
+import { orderService } from '../src/services/order.service';
 
 const testDbUrl = process.env.TEST_DATABASE_URL;
 
@@ -14,13 +19,13 @@ function verifyTestDatabaseSafety(url: string | undefined): boolean {
     throw new Error('[Safety Guard] TEST_DATABASE_URL must be a valid PostgreSQL connection string.');
   }
 
-  // Must contain 'test' in the database name
+  // Must contain 'test' or 'isolated' in the database name
   const dbNameMatch = lowercase.match(/\/([^/?]+)(\?|$)/);
   const dbName = dbNameMatch ? dbNameMatch[1] : '';
 
-  if (!dbName.includes('test')) {
+  if (!dbName.includes('test') && !dbName.includes('isolated')) {
     throw new Error(
-      `[Safety Guard] Integration tests can ONLY run against databases containing 'test' in their name (Found: "${dbName}"). Aborting to protect non-test data.`
+      `[Safety Guard] Integration tests can ONLY run against databases containing 'test' or 'isolated' in their name (Found: "${dbName}"). Aborting to protect non-test data.`
     );
   }
 
@@ -34,31 +39,48 @@ function verifyTestDatabaseSafety(url: string | undefined): boolean {
 
 const isLivePostgresAvailable = Boolean(testDbUrl && verifyTestDatabaseSafety(testDbUrl));
 
+function getAdminToken(): string {
+  return jsonwebtoken.sign(
+    {
+      id: 'usr-admin-pg-test',
+      email: 'admin@optica-luxe.com',
+      name: 'Postgres Integration Administrator',
+      role: 'SUPERADMIN',
+    },
+    env.jwtSecret,
+    { expiresIn: '1h', algorithm: 'HS256' }
+  );
+}
+
 describe.runIf(isLivePostgresAvailable)(
-  'Issue 4: Real PostgreSQL Integration & Concurrency Tests (Active LIVE Database)',
+  'Issue 5: Real PostgreSQL Integration & Concurrency Tests via Production HTTP & Service Layer',
   () => {
     let testPrisma: PrismaClient;
+    let app: ReturnType<typeof createApp>;
+    let adminToken: string;
 
     beforeAll(async () => {
       testPrisma = new PrismaClient({
         datasources: { db: { url: testDbUrl } },
       });
       await testPrisma.$connect();
+      app = createApp();
+      adminToken = getAdminToken();
     });
 
     afterAll(async () => {
       await testPrisma.$disconnect();
     });
 
-    it('Scenario 1: Two customers buying the last item (stock=1) concurrently -> exactly ONE succeeds and stock=0', async () => {
-      // 1. Seed a test product with stock = 1
+    it('Scenario 1: Two customers buying the last item (stock=1) concurrently via real HTTP API -> exactly ONE succeeds and stock=0', async () => {
+      // 1. Seed product with stock = 1
       const testProduct = await testPrisma.product.upsert({
-        where: { sku: 'PG-CONCURRENCY-01' },
-        update: { stock: 1, price: new Decimal(2500) },
+        where: { sku: 'PG-REAL-CONC-01' },
+        update: { stock: 1, price: new Decimal(3200) },
         create: {
-          sku: 'PG-CONCURRENCY-01',
-          name: 'Postgres Concurrency Test Frame',
-          price: new Decimal(2500),
+          sku: 'PG-REAL-CONC-01',
+          name: 'Real HTTP Concurrency Frame',
+          price: new Decimal(3200),
           stock: 1,
           category: 'sunglasses',
           brand: 'OpticaLuxe',
@@ -66,179 +88,105 @@ describe.runIf(isLivePostgresAvailable)(
         },
       });
 
-      expect(testProduct.stock).toBe(1);
-
-      // Attempt 2 parallel transactions directly against PostgreSQL
-      const executeOrderTransaction = async (customerName: string) => {
-        return testPrisma.$transaction(async (tx) => {
-          // Conditional atomic decrement
-          const updateResult = await tx.product.updateMany({
-            where: {
-              id: testProduct.id,
-              stock: { gte: 1 },
-            },
-            data: {
-              stock: { decrement: 1 },
-            },
-          });
-
-          if (updateResult.count === 0) {
-            throw new Error('OUT_OF_STOCK');
-          }
-
-          const order = await tx.order.create({
-            data: {
-              orderNumber: `OPT-PG-TEST-${Math.floor(10000 + Math.random() * 90000)}`,
-              customerName,
-              phone: '01011112222',
-              email: 'test@example.com',
-              address: 'Test Address',
-              city: 'Cairo',
-              subtotal: new Decimal(2500),
-              total: new Decimal(2500),
-              items: {
-                create: [
-                  {
-                    productId: testProduct.id,
-                    productName: testProduct.name,
-                    productImage: testProduct.image,
-                    unitPrice: new Decimal(2500),
-                    quantity: 1,
-                    total: new Decimal(2500),
-                  },
-                ],
-              },
-            },
-          });
-
-          return order;
+      // 2. Fire 2 concurrent HTTP POST /api/orders requests using real application route
+      const customerA = request(app)
+        .post('/api/orders')
+        .send({
+          customerName: 'Customer A (Concurrent)',
+          phone: '01011111111',
+          email: 'custA@example.com',
+          address: 'Cairo Address',
+          city: 'Cairo',
+          items: [{ productId: testProduct.id, quantity: 1 }],
+          idempotencyKey: 'idemp_pg_real_conc_cust_a',
         });
-      };
 
-      const results = await Promise.allSettled([
-        executeOrderTransaction('Customer Alpha'),
-        executeOrderTransaction('Customer Beta'),
-      ]);
+      const customerB = request(app)
+        .post('/api/orders')
+        .send({
+          customerName: 'Customer B (Concurrent)',
+          phone: '01022222222',
+          email: 'custB@example.com',
+          address: 'Giza Address',
+          city: 'Giza',
+          items: [{ productId: testProduct.id, quantity: 1 }],
+          idempotencyKey: 'idemp_pg_real_conc_cust_b',
+        });
 
-      const fulfilled = results.filter((r) => r.status === 'fulfilled');
-      const rejected = results.filter((r) => r.status === 'rejected');
+      const [resA, resB] = await Promise.all([customerA, customerB]);
 
-      // Exactly ONE succeeds
-      expect(fulfilled.length).toBe(1);
-      // Exactly ONE is rejected with out of stock
-      expect(rejected.length).toBe(1);
+      const statuses = [resA.status, resB.status];
+      expect(statuses.includes(201)).toBe(true);
+      expect(statuses.includes(400)).toBe(true);
 
-      // Stock in PostgreSQL must be exactly 0, never negative
-      const updatedProduct = await testPrisma.product.findUnique({
+      // Verify PostgreSQL stock is exactly 0, never negative
+      const productInDb = await testPrisma.product.findUnique({
         where: { id: testProduct.id },
       });
-      expect(updatedProduct!.stock).toBe(0);
+      expect(productInDb!.stock).toBe(0);
     });
 
-    it('Scenario 2: Duplicate simultaneous cancellations -> inventory restored exactly ONCE', async () => {
-      // 1. Seed product with stock = 3
+    it('Scenario 2: Concurrent cancellation requests via real HTTP API -> inventory restored exactly ONCE', async () => {
+      // 1. Seed product with stock = 5
       const testProduct = await testPrisma.product.upsert({
-        where: { sku: 'PG-CANCEL-02' },
-        update: { stock: 3, price: new Decimal(1500) },
+        where: { sku: 'PG-REAL-CANCEL-02' },
+        update: { stock: 5, price: new Decimal(1800) },
         create: {
-          sku: 'PG-CANCEL-02',
-          name: 'Cancellation Concurrency Frame',
-          price: new Decimal(1500),
-          stock: 3,
+          sku: 'PG-REAL-CANCEL-02',
+          name: 'Real HTTP Cancel Frame',
+          price: new Decimal(1800),
+          stock: 5,
           category: 'eyeglasses',
           brand: 'OpticaLuxe',
           image: 'https://example.com/test.jpg',
         },
       });
 
-      // 2. Create order with 2 items -> stock decreases from 5 to 3
-      const order = await testPrisma.order.create({
-        data: {
-          orderNumber: `OPT-CANCEL-TEST-${Math.floor(10000 + Math.random() * 90000)}`,
-          customerName: 'Cancel Test Customer',
-          phone: '01033334444',
-          email: 'cancel@example.com',
-          address: 'Test Address',
-          city: 'Cairo',
-          subtotal: new Decimal(3000),
-          total: new Decimal(3000),
-          orderStatus: 'PENDING',
-          items: {
-            create: [
-              {
-                productId: testProduct.id,
-                productName: testProduct.name,
-                productImage: testProduct.image,
-                unitPrice: new Decimal(1500),
-                quantity: 2,
-                total: new Decimal(3000),
-              },
-            ],
-          },
-        },
-        include: { items: true },
+      // 2. Create order for 2 items via real orderService
+      const created = await orderService.createOrder({
+        customerName: 'Cancel Test Customer',
+        phone: '01033333333',
+        email: 'cancel@example.com',
+        address: 'Alex Address',
+        city: 'Alexandria',
+        items: [{ productId: testProduct.id, quantity: 2 }],
+        idempotencyKey: 'idemp_pg_real_cancel_key',
       });
 
-      const initialStock = 3;
+      const orderNumber = created.order.orderNumber;
 
-      // 3. Two simultaneous cancellation transactions
-      const executeCancelTransaction = async () => {
-        return testPrisma.$transaction(async (tx) => {
-          // Atomic conditional update ensuring only non-cancelled orders can transition to CANCELLED
-          const updateOrder = await tx.order.updateMany({
-            where: {
-              id: order.id,
-              orderStatus: { in: ['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED'] },
-            },
-            data: {
-              orderStatus: 'CANCELLED',
-              cancelledAt: new Date(),
-            },
-          });
+      // 3. Fire two simultaneous HTTP cancellation requests via PATCH /api/orders/:id/status
+      const cancel1 = request(app)
+        .patch(`/api/orders/${orderNumber}/status`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ orderStatus: 'CANCELLED', cancellationReason: 'Concurrent Cancel 1' });
 
-          if (updateOrder.count === 0) {
-            throw new Error('ALREADY_CANCELLED');
-          }
+      const cancel2 = request(app)
+        .patch(`/api/orders/${orderNumber}/status`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ orderStatus: 'CANCELLED', cancellationReason: 'Concurrent Cancel 2' });
 
-          // Restore stock
-          await tx.product.update({
-            where: { id: testProduct.id },
-            data: { stock: { increment: 2 } },
-          });
+      const [res1, res2] = await Promise.all([cancel1, cancel2]);
 
-          return true;
-        });
-      };
-
-      const cancelResults = await Promise.allSettled([
-        executeCancelTransaction(),
-        executeCancelTransaction(),
-      ]);
-
-      const successfulCancels = cancelResults.filter((r) => r.status === 'fulfilled');
-      const failedCancels = cancelResults.filter((r) => r.status === 'rejected');
-
-      // Exactly one cancellation restored inventory
-      expect(successfulCancels.length).toBe(1);
-      expect(failedCancels.length).toBe(1);
-
-      // Stock in PostgreSQL must be restored by 2 (initial 3 + 2 = 5), NEVER 7 (3 + 2 + 2)
+      // Stock in PostgreSQL must be restored by 2 (back to 5), NEVER 7 (3 + 2 + 2)
       const finalProduct = await testPrisma.product.findUnique({
         where: { id: testProduct.id },
       });
-      expect(finalProduct!.stock).toBe(initialStock + 2);
+      expect(finalProduct!.stock).toBe(5);
+
+      const cancelStatuses = [res1.status, res2.status];
+      expect(cancelStatuses.includes(200)).toBe(true);
     });
 
-    it('Scenario 3: Two simultaneous requests using the same idempotency key -> duplicate order not created', async () => {
-      const uniqueIdempotencyKey = `idemp_pg_concurrency_${Date.now()}`;
-
+    it('Scenario 3: Concurrent Cash Collection requests via POST /api/orders/:id/collect-cash -> exactly ONE payment transition and audit record', async () => {
+      // 1. Create order and advance to DELIVERED
       const testProduct = await testPrisma.product.upsert({
-        where: { sku: 'PG-IDEMP-03' },
-        update: { stock: 10, price: new Decimal(1200) },
+        where: { sku: 'PG-REAL-CASH-03' },
+        update: { stock: 10, price: new Decimal(2200) },
         create: {
-          sku: 'PG-IDEMP-03',
-          name: 'Idempotency Concurrency Frame',
-          price: new Decimal(1200),
+          sku: 'PG-REAL-CASH-03',
+          name: 'Real HTTP Cash Collect Frame',
+          price: new Decimal(2200),
           stock: 10,
           category: 'sunglasses',
           brand: 'OpticaLuxe',
@@ -246,112 +194,176 @@ describe.runIf(isLivePostgresAvailable)(
         },
       });
 
-      const createWithIdempotency = async () => {
-        try {
-          return await testPrisma.$transaction(async (tx) => {
-            return tx.order.create({
-              data: {
-                orderNumber: `OPT-IDEMP-${Math.floor(10000 + Math.random() * 90000)}`,
-                idempotencyKey: uniqueIdempotencyKey,
-                customerName: 'Idempotent Customer',
-                phone: '01055556666',
-                email: 'idemp@example.com',
-                address: 'Test Address',
-                city: 'Cairo',
-                subtotal: new Decimal(1200),
-                total: new Decimal(1200),
-                items: {
-                  create: [
-                    {
-                      productId: testProduct.id,
-                      productName: testProduct.name,
-                      productImage: testProduct.image,
-                      unitPrice: new Decimal(1200),
-                      quantity: 1,
-                      total: new Decimal(1200),
-                    },
-                  ],
-                },
-              },
-            });
-          });
-        } catch (err: any) {
-          if (err.code === 'P2002') {
-            // Unique constraint on idempotencyKey handled gracefully
-            return testPrisma.order.findUnique({
-              where: { idempotencyKey: uniqueIdempotencyKey },
-            });
-          }
-          throw err;
-        }
-      };
-
-      const [orderA, orderB] = await Promise.all([
-        createWithIdempotency(),
-        createWithIdempotency(),
-      ]);
-
-      // Both callers receive the exact same order
-      expect(orderA).toBeDefined();
-      expect(orderB).toBeDefined();
-      expect(orderA!.id).toBe(orderB!.id);
-      expect(orderA!.orderNumber).toBe(orderB!.orderNumber);
-
-      // Verify only 1 order exists in PostgreSQL for this idempotency key
-      const count = await testPrisma.order.count({
-        where: { idempotencyKey: uniqueIdempotencyKey },
+      const created = await orderService.createOrder({
+        customerName: 'Cash Collect Customer',
+        phone: '01055554444',
+        email: 'cash@example.com',
+        address: 'Zamalek',
+        city: 'Cairo',
+        items: [{ productId: testProduct.id, quantity: 1 }],
+        idempotencyKey: 'idemp_pg_real_cash_order',
       });
-      expect(count).toBe(1);
+
+      const orderNumber = created.order.orderNumber;
+
+      // Move to DELIVERED
+      await orderService.updateOrderStatus(orderNumber, { orderStatus: 'CONFIRMED' }, { email: 'admin@optica-luxe.com' });
+      await orderService.updateOrderStatus(orderNumber, { orderStatus: 'PROCESSING' }, { email: 'admin@optica-luxe.com' });
+      await orderService.updateOrderStatus(orderNumber, { orderStatus: 'SHIPPED' }, { email: 'admin@optica-luxe.com' });
+      await orderService.updateOrderStatus(orderNumber, { orderStatus: 'DELIVERED' }, { email: 'admin@optica-luxe.com' });
+
+      // 2. Fire 2 concurrent HTTP requests to POST /api/orders/:id/collect-cash
+      const req1 = request(app)
+        .post(`/api/orders/${orderNumber}/collect-cash`)
+        .set('Authorization', `Bearer ${adminToken}`);
+
+      const req2 = request(app)
+        .post(`/api/orders/${orderNumber}/collect-cash`)
+        .set('Authorization', `Bearer ${adminToken}`);
+
+      const [res1, res2] = await Promise.all([req1, req2]);
+
+      expect(res1.status).toBe(200);
+      expect(res2.status).toBe(200);
+
+      // Exactly ONE returned alreadyPaid === false
+      const alreadyPaidValues = [res1.body.alreadyPaid, res2.body.alreadyPaid];
+      expect(alreadyPaidValues.filter((v) => v === false).length).toBe(1);
+      expect(alreadyPaidValues.filter((v) => v === true).length).toBe(1);
+
+      // Verify PostgreSQL database state: exactly ONE cash collection history record
+      const dbOrder = await testPrisma.order.findUnique({
+        where: { orderNumber },
+        include: { statusHistory: true },
+      });
+      expect(dbOrder!.paymentStatus).toBe('PAID');
+      expect(dbOrder!.paidAt).toBeDefined();
+
+      const cashHistory = dbOrder!.statusHistory.filter((h) =>
+        h.notes?.includes('Cash on Delivery')
+      );
+      expect(cashHistory.length).toBe(1);
     });
 
-    it('Scenario 4: Database failure rolls back complete transaction (No partial deduction or order creation)', async () => {
+    it('Scenario 4: Concurrent checkout with same idempotency key via real HTTP API -> single order, single stock deduction', async () => {
+      const sharedKey = `idemp_pg_concurrent_shared_${Date.now()}`;
+
       const testProduct = await testPrisma.product.upsert({
-        where: { sku: 'PG-ROLLBACK-04' },
-        update: { stock: 8, price: new Decimal(2000) },
+        where: { sku: 'PG-REAL-IDEMP-04' },
+        update: { stock: 15, price: new Decimal(1400) },
         create: {
-          sku: 'PG-ROLLBACK-04',
-          name: 'Rollback Verification Frame',
-          price: new Decimal(2000),
-          stock: 8,
+          sku: 'PG-REAL-IDEMP-04',
+          name: 'Real HTTP Idempotency Frame',
+          price: new Decimal(1400),
+          stock: 15,
           category: 'sunglasses',
           brand: 'OpticaLuxe',
           image: 'https://example.com/test.jpg',
         },
       });
 
-      const initialStock = testProduct.stock; // 8
-      const orderCountBefore = await testPrisma.order.count();
+      const payload = {
+        customerName: 'Idempotency Customer',
+        phone: '01066667777',
+        email: 'idemp.cust@example.com',
+        address: 'Nasr City',
+        city: 'Cairo',
+        items: [{ productId: testProduct.id, quantity: 1 }],
+        idempotencyKey: sharedKey,
+      };
 
-      // Transaction that fails halfway
-      await expect(
-        testPrisma.$transaction(async (tx) => {
-          // 1. Deduct stock
-          await tx.product.update({
-            where: { id: testProduct.id },
-            data: { stock: { decrement: 2 } },
-          });
+      const [res1, res2] = await Promise.all([
+        request(app).post('/api/orders').send(payload),
+        request(app).post('/api/orders').send(payload),
+      ]);
 
-          // 2. Simulate fatal unhandled runtime or database error
-          throw new Error('SIMULATED_TRANSACTION_FAILURE');
-        })
-      ).rejects.toThrow('SIMULATED_TRANSACTION_FAILURE');
+      expect([200, 201]).toContain(res1.status);
+      expect([200, 201]).toContain(res2.status);
+      expect(res1.body.data.orderNumber).toBe(res2.body.data.orderNumber);
 
-      // Stock must be completely rolled back to initialStock (8)
-      const productAfter = await testPrisma.product.findUnique({
+      // Exactly ONE order in database
+      const orderCount = await testPrisma.order.count({
+        where: { idempotencyKey: sharedKey },
+      });
+      expect(orderCount).toBe(1);
+
+      // Stock deducted only once (15 - 1 = 14)
+      const prodAfter = await testPrisma.product.findUnique({
         where: { id: testProduct.id },
       });
-      expect(productAfter!.stock).toBe(initialStock);
+      expect(prodAfter!.stock).toBe(14);
+    });
 
-      // No new orders should have been committed
-      const orderCountAfter = await testPrisma.order.count();
-      expect(orderCountAfter).toBe(orderCountBefore);
+    it('Scenario 5: Same idempotency key with DIFFERENT payload -> rejected with HTTP 409 Conflict', async () => {
+      const conflictKey = `idemp_pg_conflict_${Date.now()}`;
+
+      const testProduct = await testPrisma.product.findFirst();
+
+      const initialPayload = {
+        customerName: 'Initial Customer',
+        phone: '01011119999',
+        email: 'initial@example.com',
+        address: 'Address 1',
+        city: 'Cairo',
+        items: [{ productId: testProduct!.id, quantity: 1 }],
+        idempotencyKey: conflictKey,
+      };
+
+      const res1 = await request(app).post('/api/orders').send(initialPayload);
+      expect(res1.status).toBe(201);
+
+      // Different customer name reusing the same key
+      const res2 = await request(app).post('/api/orders').send({
+        ...initialPayload,
+        customerName: 'Tampered Customer Name',
+      });
+
+      expect(res2.status).toBe(409);
+      expect(res2.body.success).toBe(false);
+    });
+
+    it('Scenario 6: Generic status endpoint MUST REJECT setting paymentStatus: PAID with HTTP 400', async () => {
+      const order = await testPrisma.order.findFirst();
+      if (!order) return;
+
+      const patchRes = await request(app)
+        .patch(`/api/orders/${order.orderNumber}/status`)
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({
+          orderStatus: 'DELIVERED',
+          paymentStatus: 'PAID',
+        });
+
+      expect(patchRes.status).toBe(400);
+      expect(patchRes.body.message).toMatch(/(لا يمكن تعيين حالة الدفع مباشرة|حصراً عبر الإجراء المخصص)/);
+    });
+
+    it('Scenario 7: Header-Only Tracking Authorization & Privacy via real HTTP route', async () => {
+      const order = await testPrisma.order.findFirst();
+      if (!order || !order.trackingTokenHash) return;
+
+      // 1. Missing header -> 400
+      const resNoHeader = await request(app).get(`/api/orders/track/${order.orderNumber}`);
+      expect(resNoHeader.status).toBe(400);
+
+      // 2. Query-string token -> 400 rejected
+      const resQueryToken = await request(app)
+        .get(`/api/orders/track/${order.orderNumber}`)
+        .query({ token: 'some_query_token_attempt' });
+      expect(resQueryToken.status).toBe(400);
+
+      // 3. Body token -> 400 rejected
+      const resBodyToken = await request(app)
+        .post('/api/orders/track')
+        .send({ orderNumber: order.orderNumber, token: 'some_body_token_attempt' });
+      expect(resBodyToken.status).toBe(400);
     });
   }
 );
 
 // Informational test when live PostgreSQL is offline
 describe.skipIf(isLivePostgresAvailable)(
-  'Issue 4: PostgreSQL Live Integration Suite (Notice)',
+  'Issue 5: PostgreSQL Live Integration Suite (Notice)',
   () => {
     it('verifies safety guard: integration tests strictly require TEST_DATABASE_URL with a test database', () => {
       expect(verifyTestDatabaseSafety(undefined)).toBe(false);

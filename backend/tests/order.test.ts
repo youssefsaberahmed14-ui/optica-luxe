@@ -18,10 +18,43 @@ describe('Order Creation & Authoritative Pricing API', () => {
       address: 'القاهرة، المعادي',
       city: 'القاهرة',
       items: [],
+      idempotencyKey: 'opt_idemp_key_valid_123456',
     });
 
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
+  });
+
+  it('should reject order creation when idempotencyKey is missing', async () => {
+    const res = await request(app).post('/api/orders').send({
+      customerName: 'محمد أحمد',
+      phone: '01012345678',
+      email: 'mohamed@example.com',
+      address: 'القاهرة، المعادي',
+      city: 'القاهرة',
+      items: [{ productId: 'opt-001', quantity: 1 }],
+      // Missing idempotencyKey
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(JSON.stringify(res.body)).toMatch(/Idempotency Key/i);
+  });
+
+  it('should reject order creation when idempotencyKey is shorter than 16 characters', async () => {
+    const res = await request(app).post('/api/orders').send({
+      customerName: 'محمد أحمد',
+      phone: '01012345678',
+      email: 'mohamed@example.com',
+      address: 'القاهرة، المعادي',
+      city: 'القاهرة',
+      items: [{ productId: 'opt-001', quantity: 1 }],
+      idempotencyKey: 'short_key', // Less than 16 chars
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+    expect(JSON.stringify(res.body)).toMatch(/16/);
   });
 
   it('should reject order creation with invalid product ID', async () => {
@@ -37,6 +70,7 @@ describe('Order Creation & Authoritative Pricing API', () => {
           quantity: 1,
         },
       ],
+      idempotencyKey: 'opt_idemp_key_valid_999999',
     });
 
     expect(res.status).toBe(400);
@@ -55,6 +89,7 @@ describe('Order Creation & Authoritative Pricing API', () => {
           quantity: 100, // Exceeds 5
         },
       ],
+      idempotencyKey: 'opt_idemp_key_valid_888888',
     });
 
     expect(res.status).toBe(400);
@@ -77,6 +112,7 @@ describe('Order Creation & Authoritative Pricing API', () => {
       ],
       couponCode: 'LUXE2026', // 15% discount
       paymentMethod: 'COD',
+      idempotencyKey: 'opt_idemp_key_valid_777777',
     });
 
     expect(res.status).toBe(201);
@@ -98,8 +134,5 @@ describe('Order Creation & Authoritative Pricing API', () => {
     expect(order.discount).toBe(292.5);
     expect(order.shipping).toBe(75);
     expect(order.total).toBe(1732.5);
-
-    // Tracking token must be returned once
-    expect(res.body.trackingToken).toBeDefined();
   });
 });

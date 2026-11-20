@@ -4,17 +4,14 @@ import { orderService } from '../services/order.service';
 export class OrderController {
   /**
    * Customer-facing: Checkout order creation.
-   * Returns a strictly sanitized order confirmation DTO and raw tracking token ONLY ONCE.
-   * Never exposes internal database IDs, full customer address, email, phone, or token hash.
+   * Enforces mandatory idempotencyKey, returns sanitized confirmation DTO and raw tracking token once.
    */
   async create(req: Request, res: Response, next: NextFunction) {
     try {
-      // Support idempotency key from HTTP header (preferred) or body
       const idempotencyKey =
         (req.headers['idempotency-key'] as string) ||
         (req.headers['x-idempotency-key'] as string) ||
-        req.body.idempotencyKey ||
-        null;
+        req.body.idempotencyKey;
 
       const result = await orderService.createOrder({
         ...req.body,
@@ -38,10 +35,11 @@ export class OrderController {
    * Customer-facing: Secure Order Tracking.
    * STRICTLY transmits tracking token via X-Tracking-Token header.
    * REJECTS query-string tokens (?token=...) to avoid token leakage in URL history/logs.
+   * REJECTS body tokens to enforce strict header-only transport.
    */
   async track(req: Request, res: Response, next: NextFunction) {
     try {
-      // Security Check: Strictly reject tracking token in URL query parameters
+      // Security Check 1: Strictly reject tracking token in URL query parameters
       if (req.query.token !== undefined) {
         return res.status(400).json({
           success: false,
@@ -50,13 +48,29 @@ export class OrderController {
         });
       }
 
-      const orderNumber = (req.params.orderNumber || req.query.orderNumber || req.body.orderNumber) as string;
-      const token = (req.headers['x-tracking-token'] || req.body?.token) as string;
-
-      if (!orderNumber || !token) {
+      // Security Check 2: Strictly reject tracking token in request body
+      if (req.body && req.body.token !== undefined) {
         return res.status(400).json({
           success: false,
-          message: 'رقم الطلب والترويسة X-Tracking-Token مطلوبان للاستعلام عن حالة الطلب.',
+          message:
+            'إرسال رمز التتبع في جسم الطلب (Request Body) غير مسموح به لأسباب أمنية. يرجى إرسال الرمز حصراً عبر الترويسة X-Tracking-Token.',
+        });
+      }
+
+      const orderNumber = (req.params.orderNumber || req.query.orderNumber) as string;
+      const token = req.headers['x-tracking-token'] as string;
+
+      if (!orderNumber || !orderNumber.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: 'رقم الطلب مطلوب للاستعلام عن حالة التتبع.',
+        });
+      }
+
+      if (!token || typeof token !== 'string' || !token.trim()) {
+        return res.status(400).json({
+          success: false,
+          message: 'الترويسة X-Tracking-Token مطلوبة وتعتبر الوسيلة الوحيدة المصرح بها للتحقق من التتبع.',
         });
       }
 
@@ -139,7 +153,8 @@ export class OrderController {
   }
 
   /**
-   * Admin-facing: Update order status & payment status with transactional safeguards.
+   * Admin-facing: Update order status.
+   * Generic status changes only; rejects setting paymentStatus to PAID.
    * Protected by authenticateAdmin.
    */
   async updateStatus(req: Request, res: Response, next: NextFunction) {

@@ -1032,7 +1032,7 @@ export class CartComponent implements OnInit {
 
   openCheckoutModal(): void {
     if (!this.checkoutIdempotencyKey) {
-      this.checkoutIdempotencyKey = 'idemp_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
+      this.checkoutIdempotencyKey = 'opt_idemp_' + Math.random().toString(36).substring(2, 10) + '_' + Date.now();
     }
     this.isCheckoutModalOpen.set(true);
   }
@@ -1063,6 +1063,10 @@ export class CartComponent implements OnInit {
     }
 
     this.isSubmitting.set(true);
+
+    if (!this.checkoutIdempotencyKey) {
+      this.checkoutIdempotencyKey = 'opt_idemp_' + Math.random().toString(36).substring(2, 10) + '_' + Date.now();
+    }
 
     const payload = {
       customerName: this.checkoutForm.fullName,
@@ -1095,6 +1099,7 @@ export class CartComponent implements OnInit {
           // Clear cart ONLY after backend confirmation as strictly required!
           this.cartService.clearCart();
           this.closeCheckoutModal();
+          this.checkoutIdempotencyKey = null; // Clear key on successful order confirmation
           this.orderSuccess.set(true);
 
           this.notificationService.success(

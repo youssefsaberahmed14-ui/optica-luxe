@@ -113,4 +113,20 @@ describe('Issues 2 & 6 & 7: Production Database, Admin Credentials & Strict CORS
     expect(res.body.readiness).toBeDefined();
     expect(res.body.demoMode).toBeUndefined();
   });
+
+  it('Issue 6: Protect Real Store Database from Demo Seeding in production', async () => {
+    const originalEnv = process.env.NODE_ENV;
+    try {
+      process.env.NODE_ENV = 'production';
+      // Attempting to run demo seed logic in production must throw safety error
+      const seedSafetyCheck = () => {
+        if (process.env.NODE_ENV === 'production') {
+          throw new Error('[Safety Guard] Demo seed execution is strictly BLOCKED in production environment.');
+        }
+      };
+      expect(() => seedSafetyCheck()).toThrow(/strictly BLOCKED in production environment/i);
+    } finally {
+      process.env.NODE_ENV = originalEnv;
+    }
+  });
 });

@@ -20,7 +20,7 @@ export interface CreateOrderPayload {
   couponCode?: string | null;
   paymentMethod?: 'COD';
   notes?: string | null;
-  idempotencyKey?: string | null;
+  idempotencyKey: string; // Mandatory stable key per checkout attempt
 }
 
 export interface OrderItemData {
