@@ -49,32 +49,53 @@ model Product {
 }
 
 model Order {
-  id            String      @id @default(uuid())
-  orderNumber   String      @unique
-  customerName  String
-  phone         String
-  email         String
-  address       String
-  city          String      @default("القاهرة")
-  subtotal      Float
-  discount      Float       @default(0)
-  shipping      Float       @default(0)
-  total         Float
-  couponCode    String?
-  paymentMethod String      @default("demo_card")
-  paymentStatus String      @default("Demo Paid") // Unpaid, Demo Paid, Refunded
-  orderStatus   String      @default("Pending")   // Pending, Confirmed, Processing, Shipped, Delivered, Cancelled
-  notes         String?
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
+  id                  String               @id @default(uuid())
+  orderNumber         String               @unique
+  trackingTokenHash   String?
+  idempotencyKey      String?              @unique
+  customerName        String
+  phone               String
+  email               String
+  address             String
+  city                String               @default("القاهرة")
+  subtotal            Float
+  discount            Float                @default(0)
+  shipping            Float                @default(0)
+  total               Float
+  couponCode          String?
+  paymentMethod       String               @default("COD")    // Strictly COD
+  paymentStatus       String               @default("UNPAID") // UNPAID, PAID
+  orderStatus         String               @default("PENDING") // PENDING, CONFIRMED, PROCESSING, SHIPPED, DELIVERED, CANCELLED
+  notes               String?
+  cancelledAt         DateTime?
+  cancelledBy         String?
+  cancellationReason  String?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
 
-  items         OrderItem[]
+  items               OrderItem[]
+  statusHistory       OrderStatusHistory[]
 
   @@index([orderNumber])
+  @@index([trackingTokenHash])
   @@index([customerName])
   @@index([phone])
   @@index([orderStatus])
+  @@index([paymentStatus])
   @@index([createdAt])
+}
+
+model OrderStatusHistory {
+  id         String   @id @default(uuid())
+  orderId    String
+  order      Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  fromStatus String
+  toStatus   String
+  changedBy  String   // "CUSTOMER", "ADMIN", admin email
+  notes      String?
+  createdAt  DateTime @default(now())
+
+  @@index([orderId])
 }
 
 model OrderItem {

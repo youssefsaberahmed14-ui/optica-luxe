@@ -66,13 +66,21 @@ import { OrderApiService } from '../../core/services/order-api.service';
                 </div>
                 <div class="detail-row">
                   <span class="lbl">طريقة الدفع:</span>
-                  <span class="val">{{ getPaymentLabel(checkoutForm.paymentMethod) }}</span>
+                  <span class="val">الدفع عند الاستلام (Cash on Delivery)</span>
                 </div>
                 <div class="detail-row">
-                  <span class="lbl">المبلغ الإجمالي المدفوع:</span>
+                  <span class="lbl">المبلغ الإجمالي عند الاستلام:</span>
                   <span class="val highlight">{{ orderPaidTotal() }} ج.م</span>
                 </div>
               </div>
+
+              @if (orderTrackingToken()) {
+                <div class="tracking-box mt-3 p-3 bg-soft border-gold" style="background: #faf8f5; border: 1px dashed #c5a059; border-radius: 6px; text-align: center;">
+                  <span style="font-size: 0.85rem; color: #666; display: block; margin-bottom: 0.35rem;">رمز التتبع السري والآمن لشحنتك:</span>
+                  <code style="font-size: 0.95rem; font-weight: bold; color: #111; letter-spacing: 1px; word-break: break-all;">{{ orderTrackingToken() }}</code>
+                  <small style="display: block; font-size: 0.75rem; color: #888; margin-top: 0.35rem;">يرجى حفظ هذا الرمز للاستعلام عن مسار الشحنة بأمان تام.</small>
+                </div>
+              }
             </div>
 
             <div class="success-actions">
@@ -333,46 +341,20 @@ import { OrderApiService } from '../../core/services/order-api.service';
               </div>
 
               <!-- Payment Method Selection -->
-              <div class="form-section-title mt-3">طريقة الدفع (تجريبية Demo)</div>
-              <div class="payment-options-grid">
-                <label class="pay-option" [class.selected]="checkoutForm.paymentMethod === 'demo_card'">
+              <div class="form-section-title mt-3">طريقة الدفع المعتمدة</div>
+              <div class="payment-options-grid single-option">
+                <label class="pay-option selected" style="grid-column: 1 / -1; display: flex; align-items: center; gap: 0.75rem; border: 2px solid #c5a059; background: #faf8f5; padding: 1rem; border-radius: 8px;">
                   <input
                     type="radio"
                     name="pay"
-                    value="demo_card"
+                    value="COD"
                     [(ngModel)]="checkoutForm.paymentMethod"
+                    checked
                   />
-                  <span class="pay-title">بطاقة بنكية (تجريبي Demo)</span>
-                </label>
-
-                <label class="pay-option" [class.selected]="checkoutForm.paymentMethod === 'demo_wallet'">
-                  <input
-                    type="radio"
-                    name="pay"
-                    value="demo_wallet"
-                    [(ngModel)]="checkoutForm.paymentMethod"
-                  />
-                  <span class="pay-title">محفظة ذكية / فودافون كاش (تجريبي)</span>
-                </label>
-
-                <label class="pay-option" [class.selected]="checkoutForm.paymentMethod === 'demo_fawry'">
-                  <input
-                    type="radio"
-                    name="pay"
-                    value="demo_fawry"
-                    [(ngModel)]="checkoutForm.paymentMethod"
-                  />
-                  <span class="pay-title">فوري باي Fawry (تجريبي)</span>
-                </label>
-
-                <label class="pay-option" [class.selected]="checkoutForm.paymentMethod === 'demo_cod'">
-                  <input
-                    type="radio"
-                    name="pay"
-                    value="demo_cod"
-                    [(ngModel)]="checkoutForm.paymentMethod"
-                  />
-                  <span class="pay-title">دفع عند الاستلام (تجريبي)</span>
+                  <div>
+                    <span class="pay-title" style="font-weight: 700; color: #111; display: block;">الدفع عند الاستلام (Cash on Delivery)</span>
+                    <small style="display: block; color: #666; font-size: 0.8rem; margin-top: 0.2rem;">سداد إجمالي الفاتورة نقدياً لمندوب الشحن بعد استلام وفحص النظارة</small>
+                  </div>
                 </label>
               </div>
 
@@ -998,6 +980,8 @@ export class CartComponent implements OnInit {
   orderSuccess = signal<boolean>(false);
   orderId = signal<string>('');
   orderPaidTotal = signal<number>(0);
+  orderTrackingToken = signal<string>('');
+  private checkoutIdempotencyKey: string | null = null;
 
   checkoutForm = {
     fullName: '',
@@ -1005,7 +989,7 @@ export class CartComponent implements OnInit {
     email: '',
     city: 'القاهرة',
     address: '',
-    paymentMethod: 'demo_card',
+    paymentMethod: 'COD',
   };
 
   ngOnInit(): void {
@@ -1047,6 +1031,9 @@ export class CartComponent implements OnInit {
   }
 
   openCheckoutModal(): void {
+    if (!this.checkoutIdempotencyKey) {
+      this.checkoutIdempotencyKey = 'idemp_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
+    }
     this.isCheckoutModalOpen.set(true);
   }
 
@@ -1085,8 +1072,9 @@ export class CartComponent implements OnInit {
       address: this.checkoutForm.address,
       items,
       couponCode: this.cartService.appliedCoupon() || null,
-      paymentMethod: this.checkoutForm.paymentMethod,
-      notes: 'طلب تجريبي عبر موقع أوبتيكا لاكشري',
+      paymentMethod: 'COD' as const,
+      notes: 'طلب متجر أوبتيكا لاكشري - دفع عند الاستلام (COD)',
+      idempotencyKey: this.checkoutIdempotencyKey,
     };
 
     this.orderApiService.createOrder(payload).subscribe({
@@ -1097,14 +1085,21 @@ export class CartComponent implements OnInit {
           this.orderId.set(confirmedOrder.orderNumber);
           this.orderPaidTotal.set(confirmedOrder.total);
 
+          if (res.trackingToken) {
+            this.orderTrackingToken.set(res.trackingToken);
+            try {
+              localStorage.setItem(`optica_tracking_${confirmedOrder.orderNumber}`, res.trackingToken);
+            } catch (_) {}
+          }
+
           // Clear cart ONLY after backend confirmation as strictly required!
           this.cartService.clearCart();
           this.closeCheckoutModal();
           this.orderSuccess.set(true);
 
           this.notificationService.success(
-            `تم تأكيد طلبك برقم ${confirmedOrder.orderNumber} وحفظه في قاعدة البيانات!`,
-            'طلب مؤكد بنجاح'
+            `تم تأكيد طلبك برقم ${confirmedOrder.orderNumber} بنجاح!`,
+            'طلب مؤكد - الدفع عند الاستلام'
           );
 
           if (typeof window !== 'undefined') {
@@ -1122,17 +1117,7 @@ export class CartComponent implements OnInit {
   }
 
   getPaymentLabel(method: string): string {
-    const map: Record<string, string> = {
-      demo_card: 'بطاقة بنكية (تجريبي Demo)',
-      demo_wallet: 'محفظة ذكية / فودافون كاش (تجريبي Demo)',
-      demo_fawry: 'فوري باي Fawry (تجريبي Demo)',
-      demo_cod: 'دفع عند الاستلام (تجريبي Demo)',
-      applepay: 'Apple Pay (تجريبي Demo)',
-      mada: 'بطاقة مدى (تجريبي Demo)',
-      credit: 'بطاقة ائتمانية (تجريبي Demo)',
-      tabby: 'تابي تقسيط (تجريبي Demo)',
-    };
-    return map[method] || method;
+    return 'الدفع عند الاستلام (Cash on Delivery)';
   }
 }
 

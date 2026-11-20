@@ -11,6 +11,7 @@ export interface AuthenticatedUser {
 
 export interface AuthenticatedRequest extends Request {
   user?: AuthenticatedUser;
+  admin?: AuthenticatedUser;
 }
 
 export const authenticateAdmin = (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
@@ -26,8 +27,10 @@ export const authenticateAdmin = (req: AuthenticatedRequest, res: Response, next
   const token = authHeader.split(' ')[1];
 
   try {
-    const decoded = jwt.verify(token, env.jwtSecret) as AuthenticatedUser;
+    // Explicitly enforce HS256 to prevent algorithm manipulation attacks
+    const decoded = jwt.verify(token, env.jwtSecret, { algorithms: ['HS256'] }) as AuthenticatedUser;
     req.user = decoded;
+    req.admin = decoded;
     next();
   } catch (error) {
     return res.status(401).json({

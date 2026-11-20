@@ -824,20 +824,13 @@ export class AdminOrdersComponent implements OnInit {
   }
 
   formatPaymentStatus(status: string): string {
-    const s = (status || '').toLowerCase();
-    if (s.includes('paid')) return 'مدفوع تجريبياً';
-    if (s.includes('unpaid')) return 'غير مدفوع';
-    if (s.includes('refund')) return 'مسترجع';
+    const s = (status || '').toUpperCase();
+    if (s === 'PAID') return 'تم التحصيل (مدفوع)';
+    if (s === 'UNPAID') return 'غير مدفوع (بانتظار التحصيل عند الاستلام)';
     return status;
   }
 
   formatPaymentMethod(method: string): string {
-    const map: Record<string, string> = {
-      cash_on_delivery: 'دفع عند الاستلام',
-      demo_card: 'بطاقة تجريبية',
-      demo_instapay: 'انستاباي تجريبي',
-      demo_vodafone: 'فودافون كاش تجريبي',
-    };
-    return map[method] || method;
+    return 'الدفع عند الاستلام (COD)';
   }
 }

@@ -18,8 +18,9 @@ export interface CreateOrderPayload {
   city: string;
   items: OrderItemPayload[];
   couponCode?: string | null;
-  paymentMethod?: string;
+  paymentMethod?: 'COD';
   notes?: string | null;
+  idempotencyKey?: string | null;
 }
 
 export interface OrderItemData {
@@ -48,12 +49,15 @@ export interface OrderData {
   shipping: number;
   total: number;
   couponCode?: string | null;
-  paymentMethod: string;
-  paymentStatus: string;
-  orderStatus: string;
+  paymentMethod: 'COD';
+  paymentStatus: 'UNPAID' | 'PAID';
+  orderStatus: 'PENDING' | 'CONFIRMED' | 'PROCESSING' | 'SHIPPED' | 'DELIVERED' | 'CANCELLED';
   notes?: string | null;
   createdAt: string;
   updatedAt: string;
+  cancelledAt?: string | null;
+  cancelledBy?: string | null;
+  cancellationReason?: string | null;
   items: OrderItemData[];
 }
 
@@ -67,6 +71,33 @@ export interface SingleOrderResponse {
   success: boolean;
   message?: string;
   data: OrderData;
+  trackingToken?: string;
+}
+
+export interface TrackingDataResponse {
+  success: boolean;
+  data: {
+    orderNumber: string;
+    orderStatus: string;
+    paymentMethod: string;
+    paymentStatus: string;
+    city: string;
+    subtotal: number;
+    discount: number;
+    shipping: number;
+    total: number;
+    createdAt: string;
+    estimatedDelivery: string;
+    items: Array<{
+      productName: string;
+      productImage: string;
+      unitPrice: number;
+      quantity: number;
+      total: number;
+      selectedColor?: string;
+      lensOption?: string;
+    }>;
+  };
 }
 
 @Injectable({
@@ -78,6 +109,11 @@ export class OrderApiService {
 
   createOrder(payload: CreateOrderPayload): Observable<SingleOrderResponse> {
     return this.http.post<SingleOrderResponse>(this.baseUrl, payload);
+  }
+
+  trackOrder(orderNumber: string, token: string): Observable<TrackingDataResponse> {
+    const params = new HttpParams().set('token', token);
+    return this.http.get<TrackingDataResponse>(`${this.baseUrl}/track/${orderNumber}`, { params });
   }
 
   getOrderById(idOrNumber: string): Observable<SingleOrderResponse> {
@@ -106,7 +142,7 @@ export class OrderApiService {
 
   updateOrderStatus(
     orderId: string,
-    update: { orderStatus: string; paymentStatus?: string; notes?: string }
+    update: { orderStatus: string; paymentStatus?: string; notes?: string; cancellationReason?: string }
   ): Observable<SingleOrderResponse> {
     return this.http.patch<SingleOrderResponse>(`${this.baseUrl}/${orderId}/status`, update);
   }

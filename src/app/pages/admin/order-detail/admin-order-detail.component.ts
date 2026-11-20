@@ -212,11 +212,10 @@ import { IconComponent } from '../../../shared/components/icon/icon.component';
               </div>
 
               <div class="form-group">
-                <label class="form-label">حالة الدفع التجريبي:</label>
+                <label class="form-label">حالة التحصيل (COD):</label>
                 <select [(ngModel)]="editPaymentStatus" class="form-select">
-                  <option value="Demo Paid">مدفوع تجريبياً (Demo Paid)</option>
-                  <option value="Unpaid">غير مدفوع (Unpaid)</option>
-                  <option value="Refunded">مسترجع (Refunded)</option>
+                  <option value="UNPAID">غير مدفوع (UNPAID - بانتظار التسليم)</option>
+                  <option value="PAID">تم التحصيل نقداً (PAID - تم التسليم)</option>
                 </select>
               </div>
 
@@ -814,20 +813,13 @@ export class AdminOrderDetailComponent implements OnInit {
   }
 
   formatPaymentStatus(status: string): string {
-    const s = (status || '').toLowerCase();
-    if (s.includes('paid')) return 'مدفوع تجريبياً';
-    if (s.includes('unpaid')) return 'غير مدفوع';
-    if (s.includes('refund')) return 'مسترجع';
+    const s = (status || '').toUpperCase();
+    if (s === 'PAID') return 'تم التحصيل نقداً (مدفوع)';
+    if (s === 'UNPAID') return 'غير مدفوع (بانتظار التحصيل عند التسليم)';
     return status;
   }
 
   formatPaymentMethod(method: string): string {
-    const map: Record<string, string> = {
-      cash_on_delivery: 'الدفع عند الاستلام (كاش)',
-      demo_card: 'بطاقة ائتمان تجريبية',
-      demo_instapay: 'محفظة انستاباي التجريبية',
-      demo_vodafone: 'فودافون كاش التجريبي',
-    };
-    return map[method] || method;
+    return 'الدفع عند الاستلام (Cash on Delivery)';
   }
 }

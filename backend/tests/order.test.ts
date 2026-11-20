@@ -1,13 +1,13 @@
 import request from 'supertest';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
-import { initializeDatabase } from '../src/database/prisma';
+import { seedIsolatedTestData } from '../src/database/prisma';
 
 const app = createApp();
 
-describe('Order Creation & Validation API', () => {
-  beforeAll(async () => {
-    await initializeDatabase();
+describe('Order Creation & Authoritative Pricing API', () => {
+  beforeEach(async () => {
+    await seedIsolatedTestData();
   });
 
   it('should reject order creation with empty cart', async () => {
@@ -42,7 +42,26 @@ describe('Order Creation & Validation API', () => {
     expect(res.status).toBe(400);
   });
 
-  it('should create order, calculate server-side prices, and return unique order number', async () => {
+  it('should reject order when requested quantity exceeds available stock', async () => {
+    const res = await request(app).post('/api/orders').send({
+      customerName: 'محمود عبد العزيز',
+      phone: '01055556666',
+      email: 'mahmoud@example.com',
+      address: 'الإسكندرية',
+      city: 'الإسكندرية',
+      items: [
+        {
+          productId: 'opt-003', // Lindberg with only 5 in stock
+          quantity: 100, // Exceeds 5
+        },
+      ],
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toContain('غير متوفرة في المخزون');
+  });
+
+  it('should create order with COD defaults, calculate authoritative server prices, and apply valid coupons', async () => {
     const res = await request(app).post('/api/orders').send({
       customerName: 'فؤاد المهندس',
       phone: '01099998888',
@@ -57,36 +76,30 @@ describe('Order Creation & Validation API', () => {
         },
       ],
       couponCode: 'LUXE2026', // 15% discount
-      paymentMethod: 'demo_card',
+      paymentMethod: 'COD',
     });
 
     expect(res.status).toBe(201);
     expect(res.body.success).toBe(true);
     const order = res.body.data;
-    expect(order.orderNumber).toMatch(/^OPT-2026-\d+$/);
+
+    expect(order.orderNumber).toBeDefined();
+    expect(order.orderNumber).toMatch(/^OPT-\d{4}-\d{4}-\d+$/);
+    expect(order.paymentMethod).toBe('COD');
+    expect(order.paymentStatus).toBe('UNPAID');
+    expect(order.orderStatus).toBe('PENDING');
+
+    // Authoritative Server Calculations:
+    // Subtotal: 1950
+    // Discount 15%: 1950 * 0.15 = 292.5
+    // Shipping: 75 EGP (subtotal < 2000)
+    // Total: 1950 - 292.5 + 75 = 1732.5
     expect(order.subtotal).toBe(1950);
-    expect(order.discount).toBe(Math.round((1950 * 15) / 100)); // 293
-    expect(order.total).toBe(1950 - 293); // 1657 (free shipping >= 500)
-    expect(order.items.length).toBe(1);
-    expect(order.items[0].productName).toContain('توم فورد');
-  });
+    expect(order.discount).toBe(292.5);
+    expect(order.shipping).toBe(75);
+    expect(order.total).toBe(1732.5);
 
-  it('should reject order when requested quantity exceeds available stock', async () => {
-    const res = await request(app).post('/api/orders').send({
-      customerName: 'عميل التجربة',
-      phone: '01000000000',
-      email: 'exceed@example.com',
-      address: 'عنوان تجريبي',
-      city: 'القاهرة',
-      items: [
-        {
-          productId: 'opt-003', // stock is 5
-          quantity: 999,
-        },
-      ],
-    });
-
-    expect(res.status).toBe(400);
-    expect(res.body.message).toContain('غير متوفرة في المخزون');
+    // Tracking token must be returned once
+    expect(res.body.trackingToken).toBeDefined();
   });
 });

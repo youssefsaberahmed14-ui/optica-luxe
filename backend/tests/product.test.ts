@@ -1,13 +1,13 @@
 import request from 'supertest';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
-import { initializeDatabase } from '../src/database/prisma';
+import { seedIsolatedTestData } from '../src/database/prisma';
 
 const app = createApp();
 
 describe('Products & Coupons API', () => {
-  beforeAll(async () => {
-    await initializeDatabase();
+  beforeEach(async () => {
+    await seedIsolatedTestData();
   });
 
   it('should fetch all products', async () => {

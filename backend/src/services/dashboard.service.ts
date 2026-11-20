@@ -1,7 +1,12 @@
-import { fallbackDb, isPostgresConnected, prisma } from '../database/prisma';
+import { env } from '../config/env';
+import { isPostgresConnected, isolatedTestDb, prisma } from '../database/prisma';
 
 export class DashboardService {
   async getOverview() {
+    if (env.isProduction && !isPostgresConnected) {
+      throw { statusCode: 503, message: 'خدمة لوحة المؤشرات غير متاحة حالياً لعدم توفر قاعدة البيانات.' };
+    }
+
     let orders: any[] = [];
     let products: any[] = [];
 
@@ -12,20 +17,20 @@ export class DashboardService {
       });
       products = await prisma.product.findMany();
     } else {
-      orders = fallbackDb.orders;
-      products = fallbackDb.products;
+      orders = isolatedTestDb.orders;
+      products = isolatedTestDb.products;
     }
 
     const totalOrders = orders.length;
-    const pendingOrders = orders.filter((o) => o.orderStatus === 'Pending').length;
-    const confirmedOrders = orders.filter((o) => o.orderStatus === 'Confirmed').length;
-    const processingOrders = orders.filter((o) => o.orderStatus === 'Processing').length;
-    const shippedOrders = orders.filter((o) => o.orderStatus === 'Shipped').length;
-    const completedOrders = orders.filter((o) => o.orderStatus === 'Delivered').length;
-    const cancelledOrders = orders.filter((o) => o.orderStatus === 'Cancelled').length;
+    const pendingOrders = orders.filter((o) => o.orderStatus?.toUpperCase() === 'PENDING').length;
+    const confirmedOrders = orders.filter((o) => o.orderStatus?.toUpperCase() === 'CONFIRMED').length;
+    const processingOrders = orders.filter((o) => o.orderStatus?.toUpperCase() === 'PROCESSING').length;
+    const shippedOrders = orders.filter((o) => o.orderStatus?.toUpperCase() === 'SHIPPED').length;
+    const completedOrders = orders.filter((o) => o.orderStatus?.toUpperCase() === 'DELIVERED').length;
+    const cancelledOrders = orders.filter((o) => o.orderStatus?.toUpperCase() === 'CANCELLED').length;
 
     // Total sales (excluding cancelled orders)
-    const validOrders = orders.filter((o) => o.orderStatus !== 'Cancelled');
+    const validOrders = orders.filter((o) => o.orderStatus?.toUpperCase() !== 'CANCELLED');
     const totalSales = Math.round(validOrders.reduce((sum, o) => sum + (o.total || 0), 0));
 
     // Products statistics
@@ -35,12 +40,12 @@ export class DashboardService {
 
     // Status distribution
     const statusDistribution = [
-      { status: 'Pending', label: 'قيد الانتظار', count: pendingOrders, color: '#F59E0B' },
-      { status: 'Confirmed', label: 'مؤكد', count: confirmedOrders, color: '#3B82F6' },
-      { status: 'Processing', label: 'قيد التجهيز', count: processingOrders, color: '#8B5CF6' },
-      { status: 'Shipped', label: 'تم الشحن', count: shippedOrders, color: '#06B6D4' },
-      { status: 'Delivered', label: 'تم التسليم', count: completedOrders, color: '#10B981' },
-      { status: 'Cancelled', label: 'ملغي', count: cancelledOrders, color: '#EF4444' },
+      { status: 'PENDING', label: 'قيد الانتظار', count: pendingOrders, color: '#F59E0B' },
+      { status: 'CONFIRMED', label: 'مؤكد', count: confirmedOrders, color: '#3B82F6' },
+      { status: 'PROCESSING', label: 'قيد التجهيز', count: processingOrders, color: '#8B5CF6' },
+      { status: 'SHIPPED', label: 'تم الشحن', count: shippedOrders, color: '#06B6D4' },
+      { status: 'DELIVERED', label: 'تم التسليم', count: completedOrders, color: '#10B981' },
+      { status: 'CANCELLED', label: 'ملغي', count: cancelledOrders, color: '#EF4444' },
     ];
 
     // Orders over time (group by last 7 days)
@@ -56,26 +61,13 @@ export class DashboardService {
       const dateKey = new Date(o.createdAt).toISOString().split('T')[0];
       if (last7Days[dateKey]) {
         last7Days[dateKey].count++;
-        if (o.orderStatus !== 'Cancelled') {
+        if (o.orderStatus?.toUpperCase() !== 'CANCELLED') {
           last7Days[dateKey].sales += o.total || 0;
         }
       }
     });
 
-    const ordersTrend = Object.values(last7Days);
-
-    // Recent 5 orders
-    const recentOrders = orders.slice(0, 5).map((o) => ({
-      id: o.id,
-      orderNumber: o.orderNumber,
-      customerName: o.customerName,
-      phone: o.phone,
-      total: o.total,
-      orderStatus: o.orderStatus,
-      paymentMethod: o.paymentMethod,
-      createdAt: o.createdAt,
-      itemCount: o.items ? o.items.length : 0,
-    }));
+    const ordersOverTime = Object.values(last7Days);
 
     return {
       metrics: {
@@ -89,8 +81,18 @@ export class DashboardService {
         lowStockProducts,
       },
       statusDistribution,
-      ordersTrend,
-      recentOrders,
+      ordersOverTime,
+      recentOrders: orders.slice(0, 5).map((o) => ({
+        id: o.id,
+        orderNumber: o.orderNumber,
+        customerName: o.customerName,
+        phone: o.phone,
+        total: o.total,
+        orderStatus: o.orderStatus,
+        paymentStatus: o.paymentStatus,
+        paymentMethod: o.paymentMethod,
+        createdAt: o.createdAt,
+      })),
     };
   }
 }

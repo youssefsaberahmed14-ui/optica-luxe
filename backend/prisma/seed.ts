@@ -8,25 +8,31 @@ async function main() {
   console.log('🌱 Starting Optica Luxe database seed...');
 
   // 1. Seed Admin User
-  const adminEmail = env.adminDefault.email.toLowerCase();
-  const passwordHash = await bcrypt.hash(env.adminDefault.password, 10);
+  const adminEmail = (env.adminEmail || 'admin@optica-luxe.com').toLowerCase();
+  const adminPassword = env.adminPassword || (env.isProduction ? null : 'Admin@Dev2026!');
 
-  const admin = await prisma.adminUser.upsert({
-    where: { email: adminEmail },
-    update: {
-      name: env.adminDefault.name,
-      passwordHash,
-      role: 'SUPERADMIN',
-    },
-    create: {
-      name: env.adminDefault.name,
-      email: adminEmail,
-      passwordHash,
-      role: 'SUPERADMIN',
-    },
-  });
+  if (env.isProduction && !adminPassword) {
+    console.warn('⚠️ [Seed] In production, ADMIN_EMAIL and ADMIN_PASSWORD must be explicitly provided in environment.');
+  } else if (adminPassword) {
+    const passwordHash = await bcrypt.hash(adminPassword, 12);
 
-  console.log(`✅ Seeded admin user: ${admin.email}`);
+    const admin = await prisma.adminUser.upsert({
+      where: { email: adminEmail },
+      update: {
+        name: env.adminName || 'Optica Luxe Administrator',
+        passwordHash,
+        role: 'SUPERADMIN',
+      },
+      create: {
+        name: env.adminName || 'Optica Luxe Administrator',
+        email: adminEmail,
+        passwordHash,
+        role: 'SUPERADMIN',
+      },
+    });
+
+    console.log(`✅ Seeded admin user: ${admin.email}`);
+  }
 
   // 2. Seed Coupons
   const coupons = [

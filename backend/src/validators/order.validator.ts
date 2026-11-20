@@ -15,44 +15,48 @@ export const createOrderSchema = z.object({
   city: z.string().min(2, 'المدينة مطلوبة'),
   items: z.array(createOrderItemSchema).min(1, 'يجب أن تحتوي السلة على منتج واحد على الأقل'),
   couponCode: z.string().optional().nullable(),
-  paymentMethod: z.string().default('demo_card'),
+  paymentMethod: z
+    .string()
+    .optional()
+    .transform((val) => {
+      // Optica Luxe enforces Cash on Delivery (COD) only
+      return 'COD';
+    }),
   notes: z.string().optional().nullable(),
+  idempotencyKey: z.string().optional().nullable(),
 });
 
 const normalizeOrderStatus = (val: unknown) => {
   if (typeof val !== 'string') return val;
-  const s = val.trim().toLowerCase();
-  if (s === 'pending') return 'Pending';
-  if (s === 'confirmed') return 'Confirmed';
-  if (s === 'processing') return 'Processing';
-  if (s === 'shipped') return 'Shipped';
-  if (s === 'delivered') return 'Delivered';
-  if (s === 'cancelled' || s === 'canceled') return 'Cancelled';
-  return val;
+  const s = val.trim().toUpperCase();
+  return s;
 };
 
 const normalizePaymentStatus = (val: unknown) => {
   if (typeof val !== 'string') return val;
-  const s = val.trim().toLowerCase();
-  if (s === 'demo_paid' || s === 'demo paid' || s === 'paid') return 'Demo Paid';
-  if (s === 'unpaid') return 'Unpaid';
-  if (s === 'refunded') return 'Refunded';
-  return val;
+  const s = val.trim().toUpperCase();
+  if (s === 'DEMO_PAID' || s === 'DEMO PAID' || s === 'PAID') return 'PAID';
+  if (s === 'UNPAID') return 'UNPAID';
+  return s;
 };
 
 export const updateOrderStatusSchema = z.object({
   orderStatus: z.preprocess(
     normalizeOrderStatus,
-    z.enum(['Pending', 'Confirmed', 'Processing', 'Shipped', 'Delivered', 'Cancelled'])
+    z.enum(['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'])
   ),
   paymentStatus: z
-    .preprocess(
-      normalizePaymentStatus,
-      z.enum(['Unpaid', 'Demo Paid', 'Refunded'])
-    )
+    .preprocess(normalizePaymentStatus, z.enum(['UNPAID', 'PAID']))
     .optional(),
   notes: z.string().optional(),
+  cancellationReason: z.string().optional(),
+});
+
+export const trackOrderSchema = z.object({
+  orderNumber: z.string().min(3, 'رقم الطلب مطلوب'),
+  token: z.string().min(16, 'رمز التتبع غير صالح'),
 });
 
 export type CreateOrderInput = z.infer<typeof createOrderSchema>;
 export type UpdateOrderStatusInput = z.infer<typeof updateOrderStatusSchema>;
+export type TrackOrderInput = z.infer<typeof trackOrderSchema>;

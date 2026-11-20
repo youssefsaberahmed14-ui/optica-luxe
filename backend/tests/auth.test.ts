@@ -1,19 +1,18 @@
 import request from 'supertest';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
-import { env } from '../src/config/env';
-import { initializeDatabase } from '../src/database/prisma';
+import { seedIsolatedTestData } from '../src/database/prisma';
 
 const app = createApp();
 
-describe('Auth API Endpoints', () => {
-  beforeAll(async () => {
-    await initializeDatabase();
+describe('Auth API Endpoints & Security Controls', () => {
+  beforeEach(async () => {
+    await seedIsolatedTestData();
   });
 
   it('should reject login with wrong password', async () => {
     const res = await request(app).post('/api/auth/login').send({
-      email: env.adminDefault.email,
+      email: 'admin@optica-luxe.com',
       password: 'WrongPassword123!',
     });
 
@@ -21,27 +20,27 @@ describe('Auth API Endpoints', () => {
     expect(res.body.success).toBe(false);
   });
 
-  it('should login successfully with valid admin credentials', async () => {
+  it('should login successfully with valid admin credentials and return JWT', async () => {
     const res = await request(app).post('/api/auth/login').send({
-      email: env.adminDefault.email,
-      password: env.adminDefault.password,
+      email: 'admin@optica-luxe.com',
+      password: 'Admin@TestPass123!',
     });
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.data.token).toBeDefined();
-    expect(res.body.data.user.email).toBe(env.adminDefault.email.toLowerCase());
+    expect(res.body.data.user.email).toBe('admin@optica-luxe.com');
   });
 
-  it('should reject access to profile without token', async () => {
+  it('should reject access to protected profile without token', async () => {
     const res = await request(app).get('/api/auth/profile');
     expect(res.status).toBe(401);
   });
 
   it('should allow access to profile with valid token', async () => {
     const loginRes = await request(app).post('/api/auth/login').send({
-      email: env.adminDefault.email,
-      password: env.adminDefault.password,
+      email: 'admin@optica-luxe.com',
+      password: 'Admin@TestPass123!',
     });
 
     const token = loginRes.body.data.token;
@@ -51,6 +50,16 @@ describe('Auth API Endpoints', () => {
       .set('Authorization', `Bearer ${token}`);
 
     expect(profileRes.status).toBe(200);
-    expect(profileRes.body.data.email).toBe(env.adminDefault.email.toLowerCase());
+    expect(profileRes.body.data.email).toBe('admin@optica-luxe.com');
+  });
+
+  it('should reject invalid or forged JWT tokens', async () => {
+    const forgedToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.fake_signature';
+    const res = await request(app)
+      .get('/api/auth/profile')
+      .set('Authorization', `Bearer ${forgedToken}`);
+
+    expect(res.status).toBe(401);
+    expect(res.body.success).toBe(false);
   });
 });

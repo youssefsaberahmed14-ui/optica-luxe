@@ -1,4 +1,5 @@
-import { fallbackDb, isPostgresConnected, prisma } from '../database/prisma';
+import { env } from '../config/env';
+import { isPostgresConnected, isolatedTestDb, prisma } from '../database/prisma';
 
 export interface ProductFilters {
   category?: string;
@@ -15,6 +16,10 @@ export interface ProductFilters {
 
 export class ProductService {
   async getAll(filters: ProductFilters = {}) {
+    if (env.isProduction && !isPostgresConnected) {
+      throw { statusCode: 503, message: 'خدمة المنتجات غير متاحة حالياً لعدم توفر قاعدة البيانات.' };
+    }
+
     if (isPostgresConnected) {
       const where: any = {};
 
@@ -48,7 +53,9 @@ export class ProductService {
           { nameAr: { contains: q, mode: 'insensitive' } },
           { brand: { contains: q, mode: 'insensitive' } },
           { brandAr: { contains: q, mode: 'insensitive' } },
+          { description: { contains: q, mode: 'insensitive' } },
           { descriptionAr: { contains: q, mode: 'insensitive' } },
+          { sku: { contains: q, mode: 'insensitive' } },
         ];
       }
 
@@ -64,11 +71,11 @@ export class ProductService {
           orderBy = { rating: 'desc' };
           break;
         case 'newest':
-          orderBy = { isNew: 'desc' };
+          orderBy = { createdAt: 'desc' };
           break;
         case 'featured':
         default:
-          orderBy = { isFeatured: 'desc' };
+          orderBy = [{ isFeatured: 'desc' }, { isBestSeller: 'desc' }, { createdAt: 'desc' }];
           break;
       }
 
@@ -77,8 +84,7 @@ export class ProductService {
         orderBy,
       });
     } else {
-      // In-Memory Fallback
-      let result = [...fallbackDb.products];
+      let result = [...isolatedTestDb.products];
 
       if (filters.category && filters.category !== 'all') {
         result = result.filter((p) => p.category === filters.category);
@@ -109,10 +115,9 @@ export class ProductService {
         result = result.filter(
           (p) =>
             p.name.toLowerCase().includes(q) ||
-            p.nameAr?.includes(q) ||
+            (p.nameAr && p.nameAr.includes(q)) ||
             p.brand.toLowerCase().includes(q) ||
-            p.brandAr?.includes(q) ||
-            p.categoryAr?.includes(q)
+            p.sku.toLowerCase().includes(q)
         );
       }
 
@@ -124,12 +129,11 @@ export class ProductService {
           result.sort((a, b) => b.price - a.price);
           break;
         case 'rating':
-          result.sort((a, b) => b.rating - a.rating);
+          result.sort((a, b) => (b.rating || 0) - (a.rating || 0));
           break;
         case 'newest':
-          result.sort((a, b) => (b.isNew ? 1 : 0) - (a.isNew ? 1 : 0));
+          result.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
           break;
-        case 'featured':
         default:
           result.sort((a, b) => (b.isFeatured ? 1 : 0) - (a.isFeatured ? 1 : 0));
           break;
@@ -140,13 +144,23 @@ export class ProductService {
   }
 
   async getById(id: string) {
+    if (env.isProduction && !isPostgresConnected) {
+      throw { statusCode: 503, message: 'خدمة المنتجات غير متاحة حالياً لعدم توفر قاعدة البيانات.' };
+    }
+
     if (isPostgresConnected) {
-      const product = await prisma.product.findUnique({ where: { id } });
-      if (!product) throw { statusCode: 404, message: 'المنتج غير موجود' };
+      const product = await prisma.product.findUnique({
+        where: { id },
+      });
+      if (!product) {
+        throw { statusCode: 404, message: 'المنتج غير موجود.' };
+      }
       return product;
     } else {
-      const product = fallbackDb.products.find((p) => p.id === id);
-      if (!product) throw { statusCode: 404, message: 'المنتج غير موجود' };
+      const product = isolatedTestDb.products.find((p) => p.id === id);
+      if (!product) {
+        throw { statusCode: 404, message: 'المنتج غير موجود.' };
+      }
       return product;
     }
   }
@@ -156,12 +170,12 @@ export class ProductService {
       return prisma.product.create({ data });
     } else {
       const newProduct = {
-        id: 'opt-' + String(fallbackDb.products.length + 1).padStart(3, '0'),
+        id: 'opt-' + String(isolatedTestDb.products.length + 1).padStart(3, '0'),
         ...data,
         createdAt: new Date(),
         updatedAt: new Date(),
       };
-      fallbackDb.products.push(newProduct);
+      isolatedTestDb.products.push(newProduct);
       return newProduct;
     }
   }
@@ -173,39 +187,43 @@ export class ProductService {
         data,
       });
     } else {
-      const idx = fallbackDb.products.findIndex((p) => p.id === id);
-      if (idx === -1) throw { statusCode: 404, message: 'المنتج غير موجود' };
-      fallbackDb.products[idx] = {
-        ...fallbackDb.products[idx],
+      const idx = isolatedTestDb.products.findIndex((p) => p.id === id);
+      if (idx === -1) throw { statusCode: 404, message: 'المنتج غير موجود.' };
+      isolatedTestDb.products[idx] = {
+        ...isolatedTestDb.products[idx],
         ...data,
         updatedAt: new Date(),
       };
-      return fallbackDb.products[idx];
+      return isolatedTestDb.products[idx];
     }
   }
 
   async delete(id: string) {
     if (isPostgresConnected) {
-      return prisma.product.delete({ where: { id } });
+      return prisma.product.delete({
+        where: { id },
+      });
     } else {
-      const idx = fallbackDb.products.findIndex((p) => p.id === id);
-      if (idx === -1) throw { statusCode: 404, message: 'المنتج غير موجود' };
-      const deleted = fallbackDb.products.splice(idx, 1)[0];
+      const idx = isolatedTestDb.products.findIndex((p) => p.id === id);
+      if (idx === -1) throw { statusCode: 404, message: 'المنتج غير موجود.' };
+      const deleted = isolatedTestDb.products.splice(idx, 1)[0];
       return deleted;
     }
   }
 
   async updateStock(id: string, quantityChange: number) {
     if (isPostgresConnected) {
+      const product = await prisma.product.findUnique({ where: { id } });
+      if (!product) throw { statusCode: 404, message: 'المنتج غير موجود.' };
+      const newStock = Math.max(0, product.stock + quantityChange);
       return prisma.product.update({
         where: { id },
-        data: { stock: { increment: quantityChange } },
+        data: { stock: newStock },
       });
     } else {
-      const product = fallbackDb.products.find((p) => p.id === id);
-      if (product) {
-        product.stock = Math.max(0, product.stock + quantityChange);
-      }
+      const product = isolatedTestDb.products.find((p) => p.id === id);
+      if (!product) throw { statusCode: 404, message: 'المنتج غير موجود.' };
+      product.stock = Math.max(0, product.stock + quantityChange);
       return product;
     }
   }

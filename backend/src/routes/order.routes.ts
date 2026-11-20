@@ -6,14 +6,29 @@ import { createOrderSchema, updateOrderStatusSchema } from '../validators/order.
 
 const router = Router();
 
-// Public customer checkout route
+// --- Public Customer Routes ---
+
+// 1. Customer Checkout (Enforces COD, atomic stock check, returns unguessable tracking token)
 router.post('/', validateRequest(createOrderSchema), orderController.create);
 
-// Order lookup (customer order confirmation or admin)
-router.get('/:id', orderController.getById);
+// 2. Customer Secure Order Tracking (Requires valid tracking token, returns minimal public data)
+router.get('/track/:orderNumber', orderController.track);
+router.post('/track', orderController.track);
 
-// Protected admin routes
+// --- Protected Admin Routes (STRICTLY require valid JWT admin authentication) ---
+
+// 3. List and search all orders
 router.get('/', authenticateAdmin, orderController.getAll);
-router.patch('/:id/status', authenticateAdmin, validateRequest(updateOrderStatusSchema), orderController.updateStatus);
+
+// 4. View complete customer order details (Protected: never public)
+router.get('/:id', authenticateAdmin, orderController.getById);
+
+// 5. Update order status and payment status (Protected: transactional with stock restoration)
+router.patch(
+  '/:id/status',
+  authenticateAdmin,
+  validateRequest(updateOrderStatusSchema),
+  orderController.updateStatus
+);
 
 export default router;
