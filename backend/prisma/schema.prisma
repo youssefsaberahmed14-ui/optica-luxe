@@ -113,6 +113,7 @@ model OrderItem {
   total         Decimal  @db.Decimal(10, 2)
   selectedColor String?
   lensOption    String?
+  prescription  Json?
   createdAt     DateTime @default(now())
 
   @@index([orderId])
@@ -139,6 +140,7 @@ model Coupon {
   isActive      Boolean   @default(true)
   expiryDate    DateTime?
   usageCount    Int       @default(0)
+  maxUses       Int?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 

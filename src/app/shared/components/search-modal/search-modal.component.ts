@@ -1,5 +1,5 @@
 ﻿import { CommonModule } from '@angular/common';
-import { ChangeDetectionStrategy, Component, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { Router, RouterModule } from '@angular/router';
 import { Product } from '../../../core/models/product.model';
@@ -331,7 +331,7 @@ export class SearchModalComponent {
 
   searchQuery = '';
   filteredResults = signal<Product[]>([]);
-  featuredList = signal<Product[]>(this.productService.products().slice(0, 4));
+  featuredList = computed(() => this.productService.products().slice(0, 4));
 
   close(): void {
     this.searchService.close();

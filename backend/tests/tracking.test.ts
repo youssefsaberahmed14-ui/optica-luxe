@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
-import { seedIsolatedTestData } from '../src/database/prisma';
+import { seedIsolatedTestData, TEST_UUIDS } from '../src/database/prisma';
 
 const app = createApp();
 
@@ -20,7 +20,7 @@ describe('Issue 4: Strict Header-Only Customer Order Tracking & Authorization', 
         email: 'tarek@example.com',
         address: 'شارع الثورة، مصر الجديدة، شقة 12',
         city: 'القاهرة',
-        items: [{ productId: 'opt-001', quantity: 1 }],
+        items: [{ productId: TEST_UUIDS.cartier, quantity: 1 }],
         idempotencyKey: 'idemp_tracking_checkout_01_key',
       });
 
@@ -31,7 +31,8 @@ describe('Issue 4: Strict Header-Only Customer Order Tracking & Authorization', 
     // Raw tracking token is returned in the root response only once
     expect(res.body.trackingToken).toBeDefined();
     expect(typeof res.body.trackingToken).toBe('string');
-    expect(res.body.trackingToken.length).toBe(64); // 32 bytes hex = 64 characters
+    expect(res.body.trackingToken.startsWith('trk_')).toBe(true);
+    expect(res.body.trackingToken.length).toBeGreaterThanOrEqual(64);
 
     // Critical Security Assertions: Data DTO must NOT expose internal DB IDs, customer PII, or token hash
     expect(res.body.data.id).toBeUndefined();
@@ -57,7 +58,7 @@ describe('Issue 4: Strict Header-Only Customer Order Tracking & Authorization', 
         email: 'karim@example.com',
         address: 'حي الدقي، الجيزة',
         city: 'الجيزة',
-        items: [{ productId: 'opt-002', quantity: 1 }],
+        items: [{ productId: TEST_UUIDS.tomFord, quantity: 1 }],
         idempotencyKey: 'idemp_tracking_checkout_02_key',
       });
 
@@ -92,7 +93,7 @@ describe('Issue 4: Strict Header-Only Customer Order Tracking & Authorization', 
         email: 'helmy@example.com',
         address: 'مدينة نصر',
         city: 'القاهرة',
-        items: [{ productId: 'opt-001', quantity: 1 }],
+        items: [{ productId: TEST_UUIDS.cartier, quantity: 1 }],
         idempotencyKey: 'idemp_tracking_checkout_03_key',
       });
 
@@ -118,7 +119,7 @@ describe('Issue 4: Strict Header-Only Customer Order Tracking & Authorization', 
         email: 'mona@example.com',
         address: 'الزمالك',
         city: 'القاهرة',
-        items: [{ productId: 'opt-001', quantity: 1 }],
+        items: [{ productId: TEST_UUIDS.cartier, quantity: 1 }],
         idempotencyKey: 'idemp_tracking_checkout_04_key',
       });
 
@@ -147,7 +148,7 @@ describe('Issue 4: Strict Header-Only Customer Order Tracking & Authorization', 
         email: 'sara.private@example.com',
         address: 'الفيلا 44، كمبوند النرجس، التجمع الخامس، القاهرة الجديدة',
         city: 'القاهرة',
-        items: [{ productId: 'opt-001', quantity: 1 }],
+        items: [{ productId: TEST_UUIDS.cartier, quantity: 1 }],
         idempotencyKey: 'idemp_tracking_checkout_05_key',
       });
 
@@ -201,7 +202,7 @@ describe('Issue 4: Strict Header-Only Customer Order Tracking & Authorization', 
         email: 'clientA@example.com',
         address: 'شارع أ',
         city: 'القاهرة',
-        items: [{ productId: 'opt-001', quantity: 1 }],
+        items: [{ productId: TEST_UUIDS.cartier, quantity: 1 }],
         idempotencyKey: 'idemp_tracking_cross_a_key_1',
       });
 
@@ -214,7 +215,7 @@ describe('Issue 4: Strict Header-Only Customer Order Tracking & Authorization', 
         email: 'clientB@example.com',
         address: 'شارع ب',
         city: 'الإسكندرية',
-        items: [{ productId: 'opt-002', quantity: 1 }],
+        items: [{ productId: TEST_UUIDS.tomFord, quantity: 1 }],
         idempotencyKey: 'idemp_tracking_cross_b_key_2',
       });
 
@@ -239,7 +240,7 @@ describe('Issue 4: Strict Header-Only Customer Order Tracking & Authorization', 
         email: 'marwan@example.com',
         address: 'شارع مصدق، الدقي',
         city: 'الجيزة',
-        items: [{ productId: 'opt-001', quantity: 1 }],
+        items: [{ productId: TEST_UUIDS.cartier, quantity: 1 }],
         idempotencyKey: 'idemp_tracking_unauth_key_1',
       });
 

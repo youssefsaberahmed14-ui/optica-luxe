@@ -3,7 +3,7 @@ import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { env } from '../src/config/env';
-import { isolatedTestDb, seedIsolatedTestData } from '../src/database/prisma';
+import { isolatedTestDb, seedIsolatedTestData, TEST_UUIDS } from '../src/database/prisma';
 
 const app = createApp();
 
@@ -37,7 +37,7 @@ describe('Issues 1, 2, 4 & 8: Order State Machine, Cancellation, COD Rules & Ded
         email: 'hossam@example.com',
         address: 'شارع الهرم، الجيزة',
         city: 'الجيزة',
-        items: [{ productId: 'opt-001', quantity: 1 }],
+        items: [{ productId: TEST_UUIDS.cartier, quantity: 1 }],
         idempotencyKey: 'idemp_lifecycle_order_01_key',
       });
 
@@ -57,7 +57,7 @@ describe('Issues 1, 2, 4 & 8: Order State Machine, Cancellation, COD Rules & Ded
         email: 'yasser@example.com',
         address: 'شارع الهرم',
         city: 'الجيزة',
-        items: [{ productId: 'opt-002', quantity: 1 }],
+        items: [{ productId: TEST_UUIDS.tomFord, quantity: 1 }],
         idempotencyKey: 'idemp_lifecycle_order_02_key',
       });
 
@@ -73,7 +73,7 @@ describe('Issues 1, 2, 4 & 8: Order State Machine, Cancellation, COD Rules & Ded
       });
 
     expect(patchPendingPaid.status).toBe(400);
-    expect(JSON.stringify(patchPendingPaid.body)).toMatch(/(لا يمكن تعيين حالة الدفع مباشرة|حصراً عبر الإجراء المخصص|لا يمكن تحويل حالة الدفع إلى مدفوع)/);
+    expect(JSON.stringify(patchPendingPaid.body)).toMatch(/(لا يمكن تعيين حالة الدفع مباشرة|حصراً عبر الإجراء المخصص|لا يمكن تحويل حالة الدفع إلى مدفوع|تعديل حالة الدفع غير مسموح به)/);
 
     // 3. Move to DELIVERED, then try to mark PAID via generic PATCH -> MUST STILL FAIL (400)
     await request(app)
@@ -119,7 +119,7 @@ describe('Issues 1, 2, 4 & 8: Order State Machine, Cancellation, COD Rules & Ded
         email: 'farouk@example.com',
         address: 'الزمالك',
         city: 'القاهرة',
-        items: [{ productId: 'opt-001', quantity: 1 }],
+        items: [{ productId: TEST_UUIDS.cartier, quantity: 1 }],
         idempotencyKey: 'idemp_lifecycle_order_03_key',
       });
 
@@ -176,7 +176,7 @@ describe('Issues 1, 2, 4 & 8: Order State Machine, Cancellation, COD Rules & Ded
   });
 
   it('should restore inventory exactly once upon order cancellation', async () => {
-    const prodBefore = isolatedTestDb.products.find((p) => p.id === 'opt-003')!;
+    const prodBefore = isolatedTestDb.products.find((p) => p.id === TEST_UUIDS.lindberg)!;
     const initialStock = prodBefore.stock; // 5
 
     // Order 2 units
@@ -188,7 +188,7 @@ describe('Issues 1, 2, 4 & 8: Order State Machine, Cancellation, COD Rules & Ded
         email: 'amr@example.com',
         address: 'جاردن سيتي',
         city: 'القاهرة',
-        items: [{ productId: 'opt-003', quantity: 2 }],
+        items: [{ productId: TEST_UUIDS.lindberg, quantity: 2 }],
         idempotencyKey: 'idemp_lifecycle_order_04_key',
       });
 
@@ -213,7 +213,7 @@ describe('Issues 1, 2, 4 & 8: Order State Machine, Cancellation, COD Rules & Ded
   });
 
   it('repeated cancellation must NOT restore inventory a second time', async () => {
-    const prod = isolatedTestDb.products.find((p) => p.id === 'opt-001')!;
+    const prod = isolatedTestDb.products.find((p) => p.id === TEST_UUIDS.cartier)!;
     const initialStock = prod.stock;
 
     const checkoutRes = await request(app)
@@ -224,7 +224,7 @@ describe('Issues 1, 2, 4 & 8: Order State Machine, Cancellation, COD Rules & Ded
         email: 'tamer@example.com',
         address: 'الشيخ زايد',
         city: 'الجيزة',
-        items: [{ productId: 'opt-001', quantity: 1 }],
+        items: [{ productId: TEST_UUIDS.cartier, quantity: 1 }],
         idempotencyKey: 'idemp_lifecycle_order_05_key',
       });
 
@@ -258,7 +258,7 @@ describe('Issues 1, 2, 4 & 8: Order State Machine, Cancellation, COD Rules & Ded
         email: 'hamaki@example.com',
         address: 'المهندسين',
         city: 'الجيزة',
-        items: [{ productId: 'opt-002', quantity: 1 }],
+        items: [{ productId: TEST_UUIDS.tomFord, quantity: 1 }],
         idempotencyKey: 'idemp_lifecycle_order_06_key',
       });
 

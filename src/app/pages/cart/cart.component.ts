@@ -1032,7 +1032,12 @@ export class CartComponent implements OnInit {
 
   openCheckoutModal(): void {
     if (!this.checkoutIdempotencyKey) {
-      this.checkoutIdempotencyKey = 'opt_idemp_' + Math.random().toString(36).substring(2, 10) + '_' + Date.now();
+      const savedKey = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('optica_checkout_idemp_key') : null;
+      this.checkoutIdempotencyKey =
+        savedKey || 'opt_idemp_' + Math.random().toString(36).substring(2, 10) + '_' + Date.now();
+      if (typeof sessionStorage !== 'undefined') {
+        sessionStorage.setItem('optica_checkout_idemp_key', this.checkoutIdempotencyKey);
+      }
     }
     this.isCheckoutModalOpen.set(true);
   }
@@ -1055,6 +1060,7 @@ export class CartComponent implements OnInit {
       quantity: item.quantity,
       selectedColor: item.selectedColor?.nameAr || undefined,
       lensOption: item.lensOption?.nameAr || undefined,
+      prescription: item.customPrescription || undefined,
     }));
 
     if (items.length === 0) {
@@ -1065,7 +1071,12 @@ export class CartComponent implements OnInit {
     this.isSubmitting.set(true);
 
     if (!this.checkoutIdempotencyKey) {
-      this.checkoutIdempotencyKey = 'opt_idemp_' + Math.random().toString(36).substring(2, 10) + '_' + Date.now();
+      const savedKey = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('optica_checkout_idemp_key') : null;
+      this.checkoutIdempotencyKey =
+        savedKey || 'opt_idemp_' + Math.random().toString(36).substring(2, 10) + '_' + Date.now();
+      if (typeof sessionStorage !== 'undefined') {
+        sessionStorage.setItem('optica_checkout_idemp_key', this.checkoutIdempotencyKey);
+      }
     }
 
     const payload = {
@@ -1092,7 +1103,7 @@ export class CartComponent implements OnInit {
           if (res.trackingToken) {
             this.orderTrackingToken.set(res.trackingToken);
             try {
-              localStorage.setItem(`optica_tracking_${confirmedOrder.orderNumber}`, res.trackingToken);
+              sessionStorage.setItem(`optica_tracking_${confirmedOrder.orderNumber}`, res.trackingToken);
             } catch (_) {}
           }
 
@@ -1100,6 +1111,9 @@ export class CartComponent implements OnInit {
           this.cartService.clearCart();
           this.closeCheckoutModal();
           this.checkoutIdempotencyKey = null; // Clear key on successful order confirmation
+          if (typeof sessionStorage !== 'undefined') {
+            sessionStorage.removeItem('optica_checkout_idemp_key');
+          }
           this.orderSuccess.set(true);
 
           this.notificationService.success(

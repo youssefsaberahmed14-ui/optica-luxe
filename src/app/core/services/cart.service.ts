@@ -1,4 +1,5 @@
 ﻿import { Injectable, computed, signal } from '@angular/core';
+import { PRICING_CONFIG } from '../config/pricing.config';
 import { CartItem, CartSummary, LensOption, PrescriptionDetails } from '../models/cart.model';
 import { Product, ProductColor } from '../models/product.model';
 
@@ -37,13 +38,16 @@ export class CartService {
     }
 
     const discountAmount = Math.round((subtotal * couponDiscountPercent) / 100);
-    const afterDiscount = subtotal - discountAmount;
+    const afterDiscount = Math.max(0, subtotal - discountAmount);
 
-    // Free shipping if afterDiscount >= 500 or items is empty
-    const shipping = items.length === 0 || afterDiscount >= 500 ? 0 : 50;
+    // Free shipping if net subtotal >= 2000 EGP or cart is empty
+    const shipping =
+      items.length === 0 || afterDiscount >= PRICING_CONFIG.FREE_SHIPPING_THRESHOLD_EGP
+        ? 0
+        : PRICING_CONFIG.STANDARD_SHIPPING_FEE_EGP;
 
-    // 15% VAT included in price or breakdown
-    const taxAmount = Math.round(afterDiscount * 0.15);
+    // 14% VAT informative breakdown included in retail price
+    const taxAmount = Math.round((afterDiscount * 14) / 114);
     const total = afterDiscount + shipping;
 
     return {

@@ -8,6 +8,7 @@ export interface OrderItemPayload {
   quantity: number;
   selectedColor?: string;
   lensOption?: string;
+  prescription?: any;
 }
 
 export interface CreateOrderPayload {
@@ -34,6 +35,7 @@ export interface OrderItemData {
   total: number;
   selectedColor?: string | null;
   lensOption?: string | null;
+  prescription?: any;
 }
 
 export interface OrderData {

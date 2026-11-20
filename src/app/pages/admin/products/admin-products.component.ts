@@ -3,6 +3,7 @@ import { ChangeDetectionStrategy, Component, OnInit, inject, signal } from '@ang
 import { FormsModule } from '@angular/forms';
 import { RouterModule } from '@angular/router';
 import { AdminProductsService, ProductDto } from '../../../core/services/admin-products.service';
+import { ProductService } from '../../../core/services/product.service';
 import { IconComponent } from '../../../shared/components/icon/icon.component';
 
 @Component({
@@ -866,6 +867,7 @@ import { IconComponent } from '../../../shared/components/icon/icon.component';
 })
 export class AdminProductsComponent implements OnInit {
   private adminProductsService = inject(AdminProductsService);
+  private storefrontProductService = inject(ProductService);
 
   products = signal<ProductDto[]>([]);
   loading = signal<boolean>(true);
@@ -930,6 +932,7 @@ export class AdminProductsComponent implements OnInit {
         this.products.update((list) =>
           list.map((p) => (p.id === product.id ? { ...p, stock: res.data.stock } : p))
         );
+        this.storefrontProductService.refresh();
       },
       error: (err) => {
         this.showToast(err?.error?.message || 'تعذر تعديل المخزون', 'error');
@@ -966,6 +969,7 @@ export class AdminProductsComponent implements OnInit {
           this.products.update((list) =>
             list.map((p) => (p.id === this.currentEditingId ? res.data : p))
           );
+          this.storefrontProductService.refresh();
           this.showToast('تم تحديث المنتج بنجاح', 'success');
         },
         error: (err) => {
@@ -979,6 +983,7 @@ export class AdminProductsComponent implements OnInit {
           this.saving.set(false);
           this.closeModal();
           this.products.update((list) => [res.data, ...list]);
+          this.storefrontProductService.refresh();
           this.showToast('تمت إضافة المنتج بنجاح إلى المتجر', 'success');
         },
         error: (err) => {
@@ -996,6 +1001,7 @@ export class AdminProductsComponent implements OnInit {
     this.adminProductsService.delete(product.id).subscribe({
       next: () => {
         this.products.update((list) => list.filter((p) => p.id !== product.id));
+        this.storefrontProductService.refresh();
         this.showToast('تم حذف المنتج بنجاح', 'success');
       },
       error: (err) => {

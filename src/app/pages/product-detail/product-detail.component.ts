@@ -1133,22 +1133,27 @@ export class ProductDetailComponent implements OnInit {
     this.route.paramMap.subscribe((params) => {
       const id = params.get('id');
       if (id) {
-        const p = this.productService.getProductById(id);
-        if (p) {
-          this.product.set(p);
-          this.activeImage.set(p.images[0]);
-          this.selectedColor.set(p.colors[0]);
-          this.selectedLens.set(this.productService.lensOptions[0]);
-          this.quantity.set(1);
-          this.relatedProducts.set(this.productService.getRelatedProducts(p.id, 4));
+        this.productService.loadProductById(id).subscribe({
+          next: (p) => {
+            if (p) {
+              this.product.set(p);
+              this.activeImage.set(p.images[0]);
+              this.selectedColor.set(p.colors[0]);
+              this.selectedLens.set(this.productService.lensOptions[0]);
+              this.quantity.set(1);
+              this.relatedProducts.set(this.productService.getRelatedProducts(p.id, 4));
 
-          // scroll to top
-          if (typeof window !== 'undefined') {
-            window.scrollTo({ top: 0, behavior: 'smooth' });
-          }
-        } else {
-          this.router.navigate(['/products']);
-        }
+              if (typeof window !== 'undefined') {
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }
+            } else {
+              this.router.navigate(['/products']);
+            }
+          },
+          error: () => {
+            this.router.navigate(['/products']);
+          },
+        });
       }
     });
   }

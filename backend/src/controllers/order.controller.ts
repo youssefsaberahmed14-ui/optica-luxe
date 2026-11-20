@@ -23,7 +23,10 @@ export class OrderController {
         message: result.isDuplicate
           ? 'تم استرجاع الطلب المسجل مسبقاً بنجاح دون تكرار.'
           : 'تم استلام وتأكيد طلبك بنجاح!',
-        data: result.order, // Strictly sanitized DTO
+        data: {
+          ...result.order,
+          trackingToken: result.trackingToken,
+        },
         trackingToken: result.trackingToken, // Raw unguessable token returned ONLY in this response
       });
     } catch (error) {
@@ -159,6 +162,14 @@ export class OrderController {
    */
   async updateStatus(req: Request, res: Response, next: NextFunction) {
     try {
+      if (req.body && req.body.paymentStatus !== undefined) {
+        return res.status(400).json({
+          success: false,
+          message:
+            'تعديل حالة الدفع غير مسموح به عبر مسار تعديل الحالة العام. يجب استخدام مسار تحصيل النقدية المخصص: POST /api/orders/:id/collect-cash',
+        });
+      }
+
       const actor = (req as any).admin || {};
       const order = await orderService.updateOrderStatus(req.params.id, req.body, actor);
       res.status(200).json({

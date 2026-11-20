@@ -1,10 +1,31 @@
 import { z } from 'zod';
 
+export const eyePrescriptionSchema = z.union([
+  z.string().max(100),
+  z.number(),
+  z.record(z.any()),
+]);
+
+export const prescriptionDetailsSchema = z
+  .union([
+    z.string().max(500),
+    z.object({
+      rightEyeOD: eyePrescriptionSchema.optional().nullable(),
+      leftEyeOS: eyePrescriptionSchema.optional().nullable(),
+      pupillaryDistancePD: z.union([z.string(), z.number()]).optional().nullable(),
+      notes: z.string().max(500).optional().nullable(),
+    }),
+    z.record(z.any()),
+  ])
+  .optional()
+  .nullable();
+
 export const createOrderItemSchema = z.object({
   productId: z.string().min(1, 'معرّف المنتج مطلوب'),
   quantity: z.number().int().min(1, 'الكمية يجب أن تكون 1 على الأقل'),
-  selectedColor: z.string().optional(),
-  lensOption: z.string().optional(),
+  selectedColor: z.string().optional().nullable(),
+  lensOption: z.string().optional().nullable(),
+  prescription: prescriptionDetailsSchema,
 });
 
 export const createOrderSchema = z.object({
@@ -43,21 +64,22 @@ const normalizePaymentStatus = (val: unknown) => {
   return s;
 };
 
-export const updateOrderStatusSchema = z.object({
-  orderStatus: z.preprocess(
-    normalizeOrderStatus,
-    z.enum(['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'])
-  ),
-  paymentStatus: z
-    .preprocess(normalizePaymentStatus, z.string())
-    .optional()
-    .refine((val) => !val || val.toUpperCase() !== 'PAID', {
-      message:
-        'لا يمكن تحويل حالة الدفع إلى مدفوع (PAID) عبر مسار تعديل الحالة العام. يجب تحصيل النقدية حصراً عبر الإجراء المخصص (POST /api/orders/:id/collect-cash).',
-    }),
-  notes: z.string().optional(),
-  cancellationReason: z.string().optional(),
-});
+export const updateOrderStatusSchema = z
+  .object({
+    orderStatus: z.preprocess(
+      normalizeOrderStatus,
+      z.enum(['PENDING', 'CONFIRMED', 'PROCESSING', 'SHIPPED', 'DELIVERED', 'CANCELLED'])
+    ),
+    paymentStatus: z
+      .any()
+      .optional()
+      .refine((val) => val === undefined, {
+        message:
+          'لا يمكن تعيين حالة الدفع مباشرة عبر مسار تعديل الحالة العام. يجب تحصيل النقدية حصراً عبر الإجراء المخصص: POST /api/orders/:id/collect-cash بعد تسليم الطلب.',
+      }),
+    notes: z.string().optional(),
+    cancellationReason: z.string().optional(),
+  });
 
 export const trackOrderSchema = z.object({
   orderNumber: z.string().min(3, 'رقم الطلب مطلوب'),

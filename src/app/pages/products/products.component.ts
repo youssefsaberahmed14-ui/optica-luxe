@@ -1,5 +1,5 @@
 ﻿import { CommonModule } from '@angular/common';
-import { ChangeDetectionStrategy, Component, OnInit, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, OnInit, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router, RouterModule } from '@angular/router';
 import { FilterState, FrameMaterial, FrameShape, Gender, Product, ProductCategory } from '../../core/models/product.model';
@@ -336,7 +336,7 @@ import { ProductCardComponent } from '../../shared/components/product-card/produ
             <!-- Toolbar: Results count, active chips, layout toggles -->
             <div class="catalog-toolbar">
               <div class="results-count">
-                <span>عرض <strong>{{ filteredProducts().length }}</strong> منتج من أصل {{ allProductsCount }}</span>
+                <span>عرض <strong>{{ filteredProducts().length }}</strong> منتج من أصل {{ allProductsCount() }}</span>
               </div>
 
               <div class="toolbar-actions">
@@ -435,7 +435,24 @@ import { ProductCardComponent } from '../../shared/components/product-card/produ
             }
 
             <!-- Products Output -->
-            @if (filteredProducts().length === 0) {
+            @if (productService.isLoading()) {
+              <div class="loading-results-box" style="text-align: center; padding: 4rem 1rem;">
+                <div class="spinner" style="display: inline-block; width: 40px; height: 40px; border: 3px solid rgba(212,175,55,0.2); border-top-color: #d4af37; border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
+                <p style="margin-top: 1rem; color: #888;">جاري تحميل تشكيلة النظارات الفاخرة...</p>
+              </div>
+            } @else if (productService.error()) {
+              <div class="empty-results-box">
+                <div class="empty-icon-wrap">
+                  <app-icon name="close" [size]="52" class="gold-icon"></app-icon>
+                </div>
+                <h3>تعذر الاتصال بكتالوج المنتجات</h3>
+                <p>{{ productService.error() }}</p>
+                <button (click)="productService.refresh()" class="btn btn-gold">
+                  <span>إعادة المحاولة</span>
+                  <app-icon name="rotate-ccw" [size]="16"></app-icon>
+                </button>
+              </div>
+            } @else if (filteredProducts().length === 0) {
               <div class="empty-results-box">
                 <div class="empty-icon-wrap">
                   <app-icon name="glasses" [size]="52" class="gold-icon"></app-icon>
@@ -949,8 +966,8 @@ export class ProductsComponent implements OnInit {
     sortBy: 'featured',
   };
 
-  allProductsCount = this.productService.products().length;
-  availableBrands = signal(this.productService.getAllBrands());
+  allProductsCount = computed(() => this.productService.products().length);
+  availableBrands = computed(() => this.productService.getAllBrands());
   filteredProducts = signal<Product[]>([]);
   isListView = signal<boolean>(false);
   isMobileFilterOpen = signal<boolean>(false);
@@ -977,6 +994,11 @@ export class ProductsComponent implements OnInit {
       }
       this.updatePageTitle();
       this.applyFilters();
+    });
+
+    this.productService.loadProducts().subscribe({
+      next: () => this.applyFilters(),
+      error: () => {},
     });
   }
 

@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import Decimal from 'decimal.js';
 import { env } from '../config/env';
+import { calculateAuthoritativePricing, PRICING_CONFIG } from '../config/pricing.config';
 import { isPostgresConnected, isolatedTestDb, prisma } from '../database/prisma';
 import { CreateOrderInput, TrackOrderInput, UpdateOrderStatusInput } from '../validators/order.validator';
 
@@ -32,6 +33,7 @@ export interface SanitizedOrderItemSummary {
   total: number;
   selectedColor?: string | null;
   lensOption?: string | null;
+  prescription?: any;
 }
 
 // Sanitized Checkout Confirmation DTO (Zero private customer data, zero DB IDs, zero token hashes)
@@ -109,27 +111,59 @@ export class OrderService {
         total: new Decimal(item.total?.toString() || '0').toNumber(),
         selectedColor: item.selectedColor || null,
         lensOption: item.lensOption || null,
+        prescription: item.prescription || null,
       })),
     };
   }
 
   /**
+   * Derives a cryptographically secure, unguessable tracking token and its hash.
+   * Uses HMAC-SHA256 with high-entropy server secret so that legitimate retries with identical
+   * payload can recover the original tracking credential, while the DB stores ONLY the SHA-256 hash.
+   */
+  public generateTrackingCredentials(idempotencyKey: string, orderNumber: string): { rawToken: string; tokenHash: string } {
+    const hmacSecret = env.jwtSecret + ':optica:tracking:salt:v1';
+    const rawToken =
+      'trk_' +
+      crypto
+        .createHmac('sha256', hmacSecret)
+        .update(`${idempotencyKey.trim()}:${orderNumber.trim()}`)
+        .digest('hex');
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    return { rawToken, tokenHash };
+  }
+
+  /**
    * Verifies if an existing order matches the submitted checkout payload for idempotency.
+   * Compares all business-significant fields: customer details, address, coupon, paymentMethod,
+   * customer notes, and all item attributes (product, qty, color, lens, prescription).
    */
   private isPayloadMatching(existingOrder: any, input: CreateOrderInput): boolean {
-    const normalize = (s: string) => s.trim().toLowerCase();
+    const normalize = (s: any) => (s !== undefined && s !== null ? String(s).trim().toLowerCase() : '');
     if (normalize(existingOrder.customerName) !== normalize(input.customerName)) return false;
     if (normalize(existingOrder.email) !== normalize(input.email)) return false;
     if (normalize(existingOrder.phone) !== normalize(input.phone)) return false;
+    if (normalize(existingOrder.city) !== normalize(input.city)) return false;
+    if (normalize(existingOrder.address) !== normalize(input.address)) return false;
+    if (normalize(existingOrder.couponCode) !== normalize(input.couponCode)) return false;
+    if (normalize(existingOrder.paymentMethod) !== normalize(input.paymentMethod || 'COD')) return false;
+    if (normalize(existingOrder.notes) !== normalize(input.notes)) return false;
 
     // Compare item count
     if (!existingOrder.items || existingOrder.items.length !== input.items.length) return false;
 
-    // Compare item productIds and quantities
+    // Compare all item attributes
     for (const inItem of input.items) {
-      const match = existingOrder.items.find(
-        (ex: any) => ex.productId === inItem.productId && ex.quantity === inItem.quantity
-      );
+      const match = existingOrder.items.find((ex: any) => {
+        const prodMatch = ex.productId === inItem.productId;
+        const qtyMatch = ex.quantity === inItem.quantity;
+        const colorMatch = normalize(ex.selectedColor) === normalize(inItem.selectedColor);
+        const lensMatch = normalize(ex.lensOption) === normalize(inItem.lensOption);
+        const prescEx = typeof ex.prescription === 'string' ? ex.prescription : JSON.stringify(ex.prescription ?? null);
+        const prescIn = typeof inItem.prescription === 'string' ? inItem.prescription : JSON.stringify(inItem.prescription ?? null);
+        const prescMatch = prescEx === prescIn;
+        return prodMatch && qtyMatch && colorMatch && lensMatch && prescMatch;
+      });
       if (!match) return false;
     }
 
@@ -184,9 +218,11 @@ export class OrderService {
           };
         }
 
+        const { rawToken } = this.generateTrackingCredentials(input.idempotencyKey, existing.orderNumber);
+
         return {
           order: this.sanitizeOrderConfirmation(existing),
-          trackingToken: null,
+          trackingToken: rawToken,
           isDuplicate: true,
         };
       }
@@ -195,9 +231,9 @@ export class OrderService {
     // 2. Deterministic sort of product IDs to eliminate database lock deadlocks
     const uniqueProductIds = [...new Set(input.items.map((i) => i.productId))].sort();
 
-    // 3. Generate secure tracking token
-    const { rawToken, tokenHash } = this.generateTrackingToken();
+    // 3. Generate secure tracking credentials
     const orderNumber = await this.generateOrderNumber();
+    const { rawToken, tokenHash } = this.generateTrackingCredentials(input.idempotencyKey, orderNumber);
 
     // --- Production / Live PostgreSQL Path with Atomic Transactions ---
     if (isPostgresConnected) {
@@ -257,6 +293,7 @@ export class OrderService {
               total: lineTotal.toNumber(),
               selectedColor: item.selectedColor || null,
               lensOption: item.lensOption || null,
+              prescription: item.prescription || null,
             });
           }
 
@@ -268,29 +305,38 @@ export class OrderService {
             const code = input.couponCode.trim().toUpperCase();
             const coupon = await tx.coupon.findUnique({ where: { code } });
 
-            if (coupon && coupon.isActive) {
-              const notExpired = !coupon.expiryDate || new Date(coupon.expiryDate) > new Date();
-              if (notExpired) {
-                validCouponCode = coupon.code;
-                const cVal = new Decimal(coupon.discountValue.toString());
-                if (coupon.discountType === 'PERCENTAGE') {
-                  discountAmount = calculatedSubtotal.times(cVal).dividedBy(100).toDecimalPlaces(2);
-                } else {
-                  discountAmount = Decimal.min(cVal, calculatedSubtotal).toDecimalPlaces(2);
-                }
-
-                await tx.coupon.update({
-                  where: { id: coupon.id },
-                  data: { usageCount: { increment: 1 } },
-                });
-              }
+            if (!coupon || !coupon.isActive) {
+              throw { statusCode: 400, message: 'كود الخصم غير موجود أو غير صالح.' };
             }
+
+            if (coupon.expiryDate && new Date(coupon.expiryDate) < new Date()) {
+              throw { statusCode: 400, message: 'عذراً، كود الخصم المدخل منتهي الصلاحية.' };
+            }
+
+            const usageCount = coupon.usageCount ?? (coupon as any).usedCount ?? 0;
+            if (coupon.maxUses !== null && coupon.maxUses !== undefined && usageCount >= coupon.maxUses) {
+              throw { statusCode: 400, message: 'عذراً، لقد تم استنفاد الحد الأقصى لاستخدام كود الخصم هذا.' };
+            }
+
+            validCouponCode = coupon.code;
+            const rawDiscount = coupon.discountValue ?? (coupon as any).discountPercent ?? 0;
+            const cVal = new Decimal(rawDiscount.toString());
+            if (coupon.discountType === 'PERCENTAGE') {
+              discountAmount = calculatedSubtotal.times(cVal).dividedBy(100).toDecimalPlaces(2);
+            } else {
+              discountAmount = Decimal.min(cVal, calculatedSubtotal).toDecimalPlaces(2);
+            }
+
+            await tx.coupon.update({
+              where: { id: coupon.id },
+              data: { usageCount: { increment: 1 } },
+            });
           }
 
-          const shipping = calculatedSubtotal.greaterThanOrEqualTo(2000)
-            ? new Decimal(0)
-            : new Decimal(75); // Free shipping above 2000 EGP
-          const total = Decimal.max(0, calculatedSubtotal.minus(discountAmount).plus(shipping)).toDecimalPlaces(2);
+          // Authoritative Server-Side Pricing (Subtotal, Discount, Shipping, VAT, Total)
+          const pricing = calculateAuthoritativePricing(calculatedSubtotal, discountAmount);
+          const shipping = pricing.shipping;
+          const total = pricing.total;
 
           // E. Create Order record strictly as COD + UNPAID + PENDING
           const createdOrder = await tx.order.create({
@@ -331,7 +377,7 @@ export class OrderService {
 
           return {
             order: this.sanitizeOrderConfirmation(createdOrder),
-            trackingToken: rawToken, // Returned ONLY ONCE in successful checkout response
+            trackingToken: rawToken, // Returned in successful checkout response
             isDuplicate: false,
           };
         });
@@ -351,9 +397,11 @@ export class OrderService {
               };
             }
 
+            const { rawToken: recoveredToken } = this.generateTrackingCredentials(input.idempotencyKey, existing.orderNumber);
+
             return {
               order: this.sanitizeOrderConfirmation(existing),
-              trackingToken: null,
+              trackingToken: recoveredToken,
               isDuplicate: true,
             };
           }
@@ -368,7 +416,9 @@ export class OrderService {
 
       // Check stock
       for (const item of input.items) {
-        const prod = isolatedTestDb.products.find((p) => p.id === item.productId);
+        const prod = isolatedTestDb.products.find(
+          (p) => p.id === item.productId || p.legacyId === item.productId
+        );
         if (!prod) throw { statusCode: 400, message: 'أحد المنتجات المطلوبة غير متوفر في المتجر.' };
         if (prod.stock < item.quantity) {
           throw {
@@ -382,7 +432,9 @@ export class OrderService {
       let subtotal = new Decimal(0);
       const orderId = 'ord-' + Math.random().toString(36).substring(2, 9);
       const items = input.items.map((i) => {
-        const prod = isolatedTestDb.products.find((p) => p.id === i.productId)!;
+        const prod = isolatedTestDb.products.find(
+          (p) => p.id === i.productId || p.legacyId === i.productId
+        )!;
         prod.stock -= i.quantity;
         const unitPrice = new Decimal(prod.price.toString()).toDecimalPlaces(2);
         const lineTotal = unitPrice.times(i.quantity).toDecimalPlaces(2);
@@ -396,8 +448,9 @@ export class OrderService {
           unitPrice: unitPrice.toNumber(),
           quantity: i.quantity,
           total: lineTotal.toNumber(),
-          selectedColor: i.selectedColor,
-          lensOption: i.lensOption,
+          selectedColor: i.selectedColor || null,
+          lensOption: i.lensOption || null,
+          prescription: i.prescription || null,
         };
       });
 
@@ -405,21 +458,33 @@ export class OrderService {
       let validCouponCode: string | null = null;
       if (input.couponCode && input.couponCode.trim()) {
         const cpn = isolatedTestDb.coupons.find(
-          (c) => c.code === input.couponCode!.trim().toUpperCase() && c.isActive
+          (c) => c.code === input.couponCode!.trim().toUpperCase()
         );
-        if (cpn) {
-          validCouponCode = cpn.code;
-          const cVal = new Decimal(cpn.discountValue.toString());
-          if (cpn.discountType === 'PERCENTAGE') {
-            discountAmount = subtotal.times(cVal).dividedBy(100).toDecimalPlaces(2);
-          } else {
-            discountAmount = Decimal.min(cVal, subtotal).toDecimalPlaces(2);
-          }
+        if (!cpn || !cpn.isActive) {
+          throw { statusCode: 400, message: 'كود الخصم غير موجود أو غير صالح.' };
         }
+        if (cpn.expiryDate && new Date(cpn.expiryDate) < new Date()) {
+          throw { statusCode: 400, message: 'عذراً، كود الخصم المدخل منتهي الصلاحية.' };
+        }
+        const usageCount = cpn.usageCount ?? (cpn as any).usedCount ?? 0;
+        if (cpn.maxUses !== null && cpn.maxUses !== undefined && usageCount >= cpn.maxUses) {
+          throw { statusCode: 400, message: 'عذراً، لقد تم استنفاد الحد الأقصى لاستخدام كود الخصم هذا.' };
+        }
+
+        validCouponCode = cpn.code;
+        const rawDiscount = cpn.discountValue ?? (cpn as any).discountPercent ?? 0;
+        const cVal = new Decimal(rawDiscount.toString());
+        if (cpn.discountType === 'PERCENTAGE') {
+          discountAmount = subtotal.times(cVal).dividedBy(100).toDecimalPlaces(2);
+        } else {
+          discountAmount = Decimal.min(cVal, subtotal).toDecimalPlaces(2);
+        }
+        cpn.usageCount = (cpn.usageCount || 0) + 1;
       }
 
-      const shipping = subtotal.greaterThanOrEqualTo(2000) ? new Decimal(0) : new Decimal(75);
-      const total = Decimal.max(0, subtotal.minus(discountAmount).plus(shipping)).toDecimalPlaces(2);
+      const pricing = calculateAuthoritativePricing(subtotal, discountAmount);
+      const shipping = pricing.shipping;
+      const total = pricing.total;
 
       const newOrder = {
         id: orderId,
@@ -814,21 +879,13 @@ export class OrderService {
         }
 
         // 3. Payment Status Rules (COD):
-        // Generic status update MUST NOT bypass dedicated cash collection
-        let resolvedPaymentStatus = order.paymentStatus;
-        let paidAt = order.paidAt;
-        let paidBy = order.paidBy;
-
-        if (update.paymentStatus) {
-          const targetPayment = update.paymentStatus.toUpperCase();
-          if (targetPayment === 'PAID') {
-            throw {
-              statusCode: 400,
-              message:
-                'لا يمكن تعيين حالة الدفع مباشرة إلى مدفوع (PAID) عبر مسار تعديل الحالة العام. يجب تسجيل تحصيل النقدية حصراً عبر الإجراء المخصص (POST /api/orders/:id/collect-cash).',
-            };
-          }
-          resolvedPaymentStatus = targetPayment;
+        // Generic status update MUST NOT modify paymentStatus at all!
+        if ((update as any).paymentStatus !== undefined) {
+          throw {
+            statusCode: 400,
+            message:
+              'تعديل حالة الدفع غير مسموح به عبر مسار تعديل الحالة العام. يجب تسجيل تحصيل النقدية حصراً عبر الإجراء المخصص (POST /api/orders/:id/collect-cash).',
+          };
         }
 
         // 4. Handle Cancellation with Atomic Stock Restoration
@@ -887,16 +944,28 @@ export class OrderService {
           });
         }
 
-        // 5. Standard non-cancellation status update
-        const updatedOrder = await tx.order.update({
-          where: { id: order.id },
+        // 5. Standard non-cancellation status update:
+        // Must be conditional on expected previous state (currentStatus)
+        const conditionalUpdate = await tx.order.updateMany({
+          where: {
+            id: order.id,
+            orderStatus: currentStatus,
+          },
           data: {
             orderStatus: targetStatus,
-            paymentStatus: resolvedPaymentStatus,
-            paidAt,
-            paidBy,
             notes: update.notes !== undefined ? update.notes : order.notes,
           },
+        });
+
+        if (conditionalUpdate.count === 0) {
+          throw {
+            statusCode: 409,
+            message: `تعذر تحديث حالة الطلب: تم تعديل حالة الطلب بالتزامن من "${currentStatus}".`,
+          };
+        }
+
+        const updatedOrder = await tx.order.findUnique({
+          where: { id: order.id },
           include: { items: true },
         });
 
@@ -934,11 +1003,11 @@ export class OrderService {
         }
       }
 
-      if (update.paymentStatus && update.paymentStatus.toUpperCase() === 'PAID') {
+      if ((update as any).paymentStatus !== undefined) {
         throw {
           statusCode: 400,
           message:
-            'لا يمكن تعيين حالة الدفع مباشرة إلى مدفوع (PAID) عبر مسار تعديل الحالة العام. يجب تسجيل تحصيل النقدية حصراً عبر الإجراء المخصص (POST /api/orders/:id/collect-cash).',
+            'تعديل حالة الدفع غير مسموح به عبر مسار تعديل الحالة العام. يجب تسجيل تحصيل النقدية حصراً عبر الإجراء المخصص (POST /api/orders/:id/collect-cash).',
         };
       }
 
@@ -949,7 +1018,9 @@ export class OrderService {
 
         // Restore stock
         for (const item of order.items) {
-          const prod = isolatedTestDb.products.find((p) => p.id === item.productId);
+          const prod = isolatedTestDb.products.find(
+            (p) => p.id === item.productId || p.legacyId === item.productId
+          );
           if (prod) prod.stock += item.quantity;
         }
 
@@ -963,7 +1034,6 @@ export class OrderService {
       }
 
       order.orderStatus = targetStatus;
-      if (update.paymentStatus) order.paymentStatus = update.paymentStatus.toUpperCase();
       if (update.notes !== undefined) order.notes = update.notes;
       order.updatedAt = new Date();
       return order;

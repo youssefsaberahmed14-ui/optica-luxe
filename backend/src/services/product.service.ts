@@ -157,7 +157,7 @@ export class ProductService {
       }
       return product;
     } else {
-      const product = isolatedTestDb.products.find((p) => p.id === id);
+      const product = isolatedTestDb.products.find((p) => p.id === id || p.legacyId === id);
       if (!product) {
         throw { statusCode: 404, message: 'المنتج غير موجود.' };
       }
@@ -187,7 +187,7 @@ export class ProductService {
         data,
       });
     } else {
-      const idx = isolatedTestDb.products.findIndex((p) => p.id === id);
+      const idx = isolatedTestDb.products.findIndex((p) => p.id === id || p.legacyId === id);
       if (idx === -1) throw { statusCode: 404, message: 'المنتج غير موجود.' };
       isolatedTestDb.products[idx] = {
         ...isolatedTestDb.products[idx],
@@ -204,7 +204,7 @@ export class ProductService {
         where: { id },
       });
     } else {
-      const idx = isolatedTestDb.products.findIndex((p) => p.id === id);
+      const idx = isolatedTestDb.products.findIndex((p) => p.id === id || p.legacyId === id);
       if (idx === -1) throw { statusCode: 404, message: 'المنتج غير موجود.' };
       const deleted = isolatedTestDb.products.splice(idx, 1)[0];
       return deleted;
@@ -212,18 +212,55 @@ export class ProductService {
   }
 
   async updateStock(id: string, quantityChange: number) {
+    if (!Number.isInteger(quantityChange)) {
+      throw { statusCode: 400, message: 'مقدار تعديل المخزون يجب أن يكون رقماً صحيحاً.' };
+    }
+    if (quantityChange === 0) {
+      throw { statusCode: 400, message: 'مقدار التعديل يجب أن لا يساوي صفراً.' };
+    }
+
     if (isPostgresConnected) {
-      const product = await prisma.product.findUnique({ where: { id } });
-      if (!product) throw { statusCode: 404, message: 'المنتج غير موجود.' };
-      const newStock = Math.max(0, product.stock + quantityChange);
-      return prisma.product.update({
-        where: { id },
-        data: { stock: newStock },
-      });
+      if (quantityChange < 0) {
+        const absQty = Math.abs(quantityChange);
+        const result = await prisma.product.updateMany({
+          where: {
+            id,
+            stock: { gte: absQty },
+          },
+          data: {
+            stock: { decrement: absQty },
+          },
+        });
+
+        if (result.count === 0) {
+          const existing = await prisma.product.findUnique({ where: { id } });
+          if (!existing) throw { statusCode: 404, message: 'المنتج غير موجود.' };
+          throw {
+            statusCode: 400,
+            message: `عذراً، لا يمكن تقليل المخزون بمقدار ${absQty}. المخزون الحالي (${existing.stock}) غير كافٍ.`,
+          };
+        }
+        return prisma.product.findUnique({ where: { id } });
+      } else {
+        const product = await prisma.product.findUnique({ where: { id } });
+        if (!product) throw { statusCode: 404, message: 'المنتج غير موجود.' };
+        return prisma.product.update({
+          where: { id },
+          data: {
+            stock: { increment: quantityChange },
+          },
+        });
+      }
     } else {
-      const product = isolatedTestDb.products.find((p) => p.id === id);
+      const product = isolatedTestDb.products.find((p) => p.id === id || p.legacyId === id);
       if (!product) throw { statusCode: 404, message: 'المنتج غير موجود.' };
-      product.stock = Math.max(0, product.stock + quantityChange);
+      if (quantityChange < 0 && product.stock < Math.abs(quantityChange)) {
+        throw {
+          statusCode: 400,
+          message: `عذراً، لا يمكن تقليل المخزون بمقدار ${Math.abs(quantityChange)}. المخزون الحالي (${product.stock}) غير كافٍ.`,
+        };
+      }
+      product.stock += quantityChange;
       return product;
     }
   }

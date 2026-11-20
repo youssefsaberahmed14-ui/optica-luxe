@@ -1,10 +1,10 @@
-import { PrismaClient } from '@prisma/client';
 import Decimal from 'decimal.js';
 import jsonwebtoken from 'jsonwebtoken';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { env } from '../src/config/env';
+import { disconnectDatabase, initializeDatabase, isPostgresConnected, prisma } from '../src/database/prisma';
 import { orderService } from '../src/services/order.service';
 
 const testDbUrl = process.env.TEST_DATABASE_URL;
@@ -55,26 +55,35 @@ function getAdminToken(): string {
 describe.runIf(isLivePostgresAvailable)(
   'Issue 5: Real PostgreSQL Integration & Concurrency Tests via Production HTTP & Service Layer',
   () => {
-    let testPrisma: PrismaClient;
     let app: ReturnType<typeof createApp>;
     let adminToken: string;
 
     beforeAll(async () => {
-      testPrisma = new PrismaClient({
-        datasources: { db: { url: testDbUrl } },
-      });
-      await testPrisma.$connect();
+      process.env.DATABASE_URL = testDbUrl;
+      await initializeDatabase();
+      expect(isPostgresConnected).toBe(true);
       app = createApp();
       adminToken = getAdminToken();
     });
 
     afterAll(async () => {
-      await testPrisma.$disconnect();
+      try {
+        await prisma.orderItem.deleteMany({
+          where: { product: { sku: { startsWith: 'PG-REAL-' } } },
+        });
+        await prisma.order.deleteMany({
+          where: { idempotencyKey: { startsWith: 'idemp_pg_' } },
+        });
+        await prisma.product.deleteMany({
+          where: { sku: { startsWith: 'PG-REAL-' } },
+        });
+      } catch (_) {}
+      await disconnectDatabase();
     });
 
     it('Scenario 1: Two customers buying the last item (stock=1) concurrently via real HTTP API -> exactly ONE succeeds and stock=0', async () => {
       // 1. Seed product with stock = 1
-      const testProduct = await testPrisma.product.upsert({
+      const testProduct = await prisma.product.upsert({
         where: { sku: 'PG-REAL-CONC-01' },
         update: { stock: 1, price: new Decimal(3200) },
         create: {
@@ -120,7 +129,7 @@ describe.runIf(isLivePostgresAvailable)(
       expect(statuses.includes(400)).toBe(true);
 
       // Verify PostgreSQL stock is exactly 0, never negative
-      const productInDb = await testPrisma.product.findUnique({
+      const productInDb = await prisma.product.findUnique({
         where: { id: testProduct.id },
       });
       expect(productInDb!.stock).toBe(0);
@@ -128,7 +137,7 @@ describe.runIf(isLivePostgresAvailable)(
 
     it('Scenario 2: Concurrent cancellation requests via real HTTP API -> inventory restored exactly ONCE', async () => {
       // 1. Seed product with stock = 5
-      const testProduct = await testPrisma.product.upsert({
+      const testProduct = await prisma.product.upsert({
         where: { sku: 'PG-REAL-CANCEL-02' },
         update: { stock: 5, price: new Decimal(1800) },
         create: {
@@ -169,7 +178,7 @@ describe.runIf(isLivePostgresAvailable)(
       const [res1, res2] = await Promise.all([cancel1, cancel2]);
 
       // Stock in PostgreSQL must be restored by 2 (back to 5), NEVER 7 (3 + 2 + 2)
-      const finalProduct = await testPrisma.product.findUnique({
+      const finalProduct = await prisma.product.findUnique({
         where: { id: testProduct.id },
       });
       expect(finalProduct!.stock).toBe(5);
@@ -180,7 +189,7 @@ describe.runIf(isLivePostgresAvailable)(
 
     it('Scenario 3: Concurrent Cash Collection requests via POST /api/orders/:id/collect-cash -> exactly ONE payment transition and audit record', async () => {
       // 1. Create order and advance to DELIVERED
-      const testProduct = await testPrisma.product.upsert({
+      const testProduct = await prisma.product.upsert({
         where: { sku: 'PG-REAL-CASH-03' },
         update: { stock: 10, price: new Decimal(2200) },
         create: {
@@ -232,7 +241,7 @@ describe.runIf(isLivePostgresAvailable)(
       expect(alreadyPaidValues.filter((v) => v === true).length).toBe(1);
 
       // Verify PostgreSQL database state: exactly ONE cash collection history record
-      const dbOrder = await testPrisma.order.findUnique({
+      const dbOrder = await prisma.order.findUnique({
         where: { orderNumber },
         include: { statusHistory: true },
       });
@@ -248,7 +257,7 @@ describe.runIf(isLivePostgresAvailable)(
     it('Scenario 4: Concurrent checkout with same idempotency key via real HTTP API -> single order, single stock deduction', async () => {
       const sharedKey = `idemp_pg_concurrent_shared_${Date.now()}`;
 
-      const testProduct = await testPrisma.product.upsert({
+      const testProduct = await prisma.product.upsert({
         where: { sku: 'PG-REAL-IDEMP-04' },
         update: { stock: 15, price: new Decimal(1400) },
         create: {
@@ -282,13 +291,13 @@ describe.runIf(isLivePostgresAvailable)(
       expect(res1.body.data.orderNumber).toBe(res2.body.data.orderNumber);
 
       // Exactly ONE order in database
-      const orderCount = await testPrisma.order.count({
+      const orderCount = await prisma.order.count({
         where: { idempotencyKey: sharedKey },
       });
       expect(orderCount).toBe(1);
 
       // Stock deducted only once (15 - 1 = 14)
-      const prodAfter = await testPrisma.product.findUnique({
+      const prodAfter = await prisma.product.findUnique({
         where: { id: testProduct.id },
       });
       expect(prodAfter!.stock).toBe(14);
@@ -297,7 +306,7 @@ describe.runIf(isLivePostgresAvailable)(
     it('Scenario 5: Same idempotency key with DIFFERENT payload -> rejected with HTTP 409 Conflict', async () => {
       const conflictKey = `idemp_pg_conflict_${Date.now()}`;
 
-      const testProduct = await testPrisma.product.findFirst();
+      const testProduct = await prisma.product.findFirst();
 
       const initialPayload = {
         customerName: 'Initial Customer',
@@ -323,7 +332,7 @@ describe.runIf(isLivePostgresAvailable)(
     });
 
     it('Scenario 6: Generic status endpoint MUST REJECT setting paymentStatus: PAID with HTTP 400', async () => {
-      const order = await testPrisma.order.findFirst();
+      const order = await prisma.order.findFirst();
       if (!order) return;
 
       const patchRes = await request(app)
@@ -339,7 +348,7 @@ describe.runIf(isLivePostgresAvailable)(
     });
 
     it('Scenario 7: Header-Only Tracking Authorization & Privacy via real HTTP route', async () => {
-      const order = await testPrisma.order.findFirst();
+      const order = await prisma.order.findFirst();
       if (!order || !order.trackingTokenHash) return;
 
       // 1. Missing header -> 400

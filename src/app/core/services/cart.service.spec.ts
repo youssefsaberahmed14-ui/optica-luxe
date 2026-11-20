@@ -69,7 +69,9 @@ describe('CartService', () => {
     const res = service.applyCoupon('LUXE2026'); // 15% discount
     expect(res.success).toBe(true);
     expect(service.summary().discountAmount).toBe(150);
-    expect(service.summary().total).toBe(850);
+    // Subtotal 1000 - 150 discount = 850 + 75 shipping (under 2000 threshold) = 925
+    expect(service.summary().shipping).toBe(75);
+    expect(service.summary().total).toBe(925);
   });
 
   it('should reject invalid promo coupon', () => {

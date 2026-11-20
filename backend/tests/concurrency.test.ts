@@ -3,7 +3,7 @@ import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app';
 import { env } from '../src/config/env';
-import { isolatedTestDb, seedIsolatedTestData } from '../src/database/prisma';
+import { isolatedTestDb, seedIsolatedTestData, TEST_UUIDS } from '../src/database/prisma';
 
 const app = createApp();
 
@@ -29,7 +29,7 @@ describe('Issues 1, 3 & 4: Concurrency & Mandatory Idempotency Tests', () => {
   });
 
   it('Scenario A: Two concurrent customers purchasing the last available item (Stock=1) -> exactly ONE succeeds and final stock=0', async () => {
-    const limitedProduct = isolatedTestDb.products.find((p) => p.id === 'opt-last-item')!;
+    const limitedProduct = isolatedTestDb.products.find((p) => p.id === TEST_UUIDS.maybach)!;
     expect(limitedProduct.stock).toBe(1); // Starting stock is strictly 1
 
     // Simulate Customer A and Customer B sending orders simultaneously with unique mandatory idempotency keys
@@ -41,7 +41,7 @@ describe('Issues 1, 3 & 4: Concurrency & Mandatory Idempotency Tests', () => {
         email: 'customerA@example.com',
         address: 'عنوان أ',
         city: 'القاهرة',
-        items: [{ productId: 'opt-last-item', quantity: 1 }],
+        items: [{ productId: TEST_UUIDS.maybach, quantity: 1 }],
         idempotencyKey: 'idemp_concurrent_cust_a_key_1',
       });
 
@@ -53,7 +53,7 @@ describe('Issues 1, 3 & 4: Concurrency & Mandatory Idempotency Tests', () => {
         email: 'customerB@example.com',
         address: 'عنوان ب',
         city: 'الجيزة',
-        items: [{ productId: 'opt-last-item', quantity: 1 }],
+        items: [{ productId: TEST_UUIDS.maybach, quantity: 1 }],
         idempotencyKey: 'idemp_concurrent_cust_b_key_2',
       });
 
@@ -74,7 +74,7 @@ describe('Issues 1, 3 & 4: Concurrency & Mandatory Idempotency Tests', () => {
   });
 
   it('Scenario B: Simultaneous duplicate cancellation requests -> inventory restored exactly once (Stock increases by 2, not 4)', async () => {
-    const prod = isolatedTestDb.products.find((p) => p.id === 'opt-003')!;
+    const prod = isolatedTestDb.products.find((p) => p.id === TEST_UUIDS.lindberg)!;
     const initialStock = prod.stock; // 5
 
     // Order 2 items
@@ -86,7 +86,7 @@ describe('Issues 1, 3 & 4: Concurrency & Mandatory Idempotency Tests', () => {
         email: 'sherif.order@example.com',
         address: 'الرحاب',
         city: 'القاهرة',
-        items: [{ productId: 'opt-003', quantity: 2 }],
+        items: [{ productId: TEST_UUIDS.lindberg, quantity: 2 }],
         idempotencyKey: 'idemp_cancel_test_key_123456',
       });
 
@@ -125,7 +125,7 @@ describe('Issues 1, 3 & 4: Concurrency & Mandatory Idempotency Tests', () => {
         email: 'elgendy@example.com',
         address: 'مدينة نصر',
         city: 'القاهرة',
-        items: [{ productId: 'opt-001', quantity: 1 }],
+        items: [{ productId: TEST_UUIDS.cartier, quantity: 1 }],
         idempotencyKey: 'idemp_cash_collect_concurrent_1',
       });
 
@@ -182,7 +182,7 @@ describe('Issues 1, 3 & 4: Concurrency & Mandatory Idempotency Tests', () => {
 
   it('Idempotency mechanism: Repeated checkout submission with same idempotency key prevents duplicate orders', async () => {
     const idempotencyKey = 'checkout_idemp_key_unique_12345';
-    const prod = isolatedTestDb.products.find((p) => p.id === 'opt-001')!;
+    const prod = isolatedTestDb.products.find((p) => p.id === TEST_UUIDS.cartier)!;
     const stockBefore = prod.stock;
 
     const payload = {
@@ -191,7 +191,7 @@ describe('Issues 1, 3 & 4: Concurrency & Mandatory Idempotency Tests', () => {
       email: 'pablo@example.com',
       address: 'الإسكندرية',
       city: 'الإسكندرية',
-      items: [{ productId: 'opt-001', quantity: 1 }],
+      items: [{ productId: TEST_UUIDS.cartier, quantity: 1 }],
       idempotencyKey,
     };
 
@@ -220,7 +220,7 @@ describe('Issues 1, 3 & 4: Concurrency & Mandatory Idempotency Tests', () => {
       email: 'tarek.hossam@example.com',
       address: 'المعادي',
       city: 'القاهرة',
-      items: [{ productId: 'opt-001', quantity: 1 }],
+      items: [{ productId: TEST_UUIDS.cartier, quantity: 1 }],
       idempotencyKey,
     };
 
